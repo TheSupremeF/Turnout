@@ -44,27 +44,6 @@ secret), `vault` (Argon2id passphrase via `TURNOUT_VAULT_PASSWORD`), or `file`
 Upgrading from a build that used the plain file encrypts the keys on first run
 and renames the old file to `credentials.json.imported`.
 
-## Renamed from Relay
-
-`turnout` replaces the earlier `relay` binary. Existing installs keep working:
-
-- **Data directory:** `~/Library/Application Support/Relay` is moved once to
-  `.../Turnout` (other platforms: the data dir + `Turnout`). Nothing is
-  overwritten: if both directories exist the tool warns and leaves them alone;
-  point `TURNOUT_HOME` at the one you want.
-- **Environment variables:** every `TURNOUT_*` variable also accepts its old
-  `RELAY_*` name, and the new name wins when both are set.
-- **Background service:** `turnout gateway install` stops and removes the old
-  `dev.relay.gateway` / `relay-gateway.service` / `RelayGateway` service before
-  installing `dev.turnout.gateway` / `turnout-gateway.service` /
-  `TurnoutGateway`.
-- **Harness configs:** the next `turnout apply` writes the `turnout` provider
-  block/table and removes the old `relay` gateway entries, so providers never
-  pile up. Model ids become `turnout/<provider>/<model>`.
-- **Internal ids that did not change:** crate names (`relay-core`, …) and the
-  credential-store service id `"relay"` inside `credentials.json` are storage
-  identifiers; renaming them would lose existing keys.
-
 ## Tests
 
 ```sh
