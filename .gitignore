@@ -10,3 +10,6 @@ target/
 
 # Personal session handoff notes (local paths, private links).
 HANDOFF.md
+
+# Local release staging.
+dist-release/
