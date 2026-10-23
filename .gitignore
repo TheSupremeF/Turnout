@@ -7,3 +7,6 @@ target/
 # Local pre-edit snapshots and Design Arc review state; not part of the product.
 .backups/
 .claude/
+
+# Personal session handoff notes (local paths, private links).
+HANDOFF.md

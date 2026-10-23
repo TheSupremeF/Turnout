@@ -376,6 +376,53 @@ mod tests {
     }
 
     #[test]
+    fn creation_lock_admits_one_holder_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("vault.json.key-lock");
+        let inside = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (lock, inside, entered) = (lock.clone(), inside.clone(), entered.clone());
+                std::thread::spawn(move || {
+                    let _guard = CreationLock::acquire(lock).unwrap();
+                    // Two holders at once is exactly the race that split the key.
+                    assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                    entered.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(entered.load(Ordering::SeqCst), 16);
+        assert!(!lock.exists(), "the lock file is removed on release");
+    }
+
+    #[test]
+    fn stale_creation_lock_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("vault.json.key-lock");
+        std::fs::write(&lock, "").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // A crashed holder must not block key creation forever.
+        let started = std::time::Instant::now();
+        let _guard = CreationLock::acquire(lock).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
     fn secret_never_prints() {
         let secret = Secret::new("sk-live-abc");
         assert_eq!(format!("{secret:?}"), "Secret(***)");
