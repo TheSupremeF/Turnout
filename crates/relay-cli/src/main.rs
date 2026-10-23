@@ -1346,9 +1346,23 @@ fn credential_store(home: &Home) -> Result<Box<dyn CredentialStore>> {
                 home.credentials_file(),
             )))
         }
-        BackendChoice::Keyring => return Ok(Box::new(relay_credentials::OsKeyringStore::new())),
+        // Opt-in: the data key lives in the OS credential service, so at most
+        // one prompt per build is possible instead of one per secret.
+        BackendChoice::Keyring => {
+            let store = relay_credentials::open_encrypted(home.vault(), home.vault_key(), true)
+                .map_err(|error| {
+                    anyhow!("{error}; the OS credential service could not hold the vault key")
+                })?;
+            import_plaintext_credentials(home, store.as_ref());
+            return Ok(store);
+        }
         BackendChoice::Encrypted => {
-            let store = relay_credentials::open_encrypted(home.vault()).map_err(|error| {
+            let store = relay_credentials::open_encrypted(
+                home.vault(),
+                home.vault_key(),
+                false,
+            )
+            .map_err(|error| {
                 anyhow!(
                     "{error}; set TURNOUT_CREDENTIALS=file to store keys unencrypted, \
                      or TURNOUT_VAULT_PASSWORD to use a passphrase vault"
@@ -1360,9 +1374,7 @@ fn credential_store(home: &Home) -> Result<Box<dyn CredentialStore>> {
         BackendChoice::Vault => {}
     }
     let password = relay_core::brand::env_var("VAULT_PASSWORD").map_err(|_| {
-        anyhow!(
-            "no OS credential service found; set TURNOUT_VAULT_PASSWORD to use the encrypted vault"
-        )
+        anyhow!("the passphrase vault needs TURNOUT_VAULT_PASSWORD to be set")
     })?;
     let mut vault = relay_credentials::Vault::open(home.vault());
     if relay_credentials::Vault::exists(vault.path()) {

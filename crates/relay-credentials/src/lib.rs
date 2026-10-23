@@ -15,7 +15,7 @@ pub mod vault;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -214,62 +214,60 @@ const DATA_KEY_ACCOUNT: &str = "vault:data-key";
 /// provider entry in the OS credential service.
 const DATA_KEY_SERVICE: &str = "turnout-vault";
 
-/// A random 256-bit key, held in the OS credential service, that encrypts
-/// `vault.json`. Created on first use; never leaves the machine and is never
-/// written to disk in clear text.
+/// Read (or create) the key that seals `vault.json`.
 ///
-/// This is the default on every platform: the provider secrets end up
-/// encrypted at rest (a copied `vault.json` is useless on its own), while the
-/// tool still needs no passphrase per command — which matters because the GUI
-/// bridge spawns a fresh CLI process for every request.
+/// Default location is `key_path`, an owner-only (`0600`) file next to the
+/// vault. That is deliberate: macOS ties a Keychain item to the requesting
+/// binary's code signature, and every rebuild of `turnout` produces a new
+/// signature, so an unsigned or ad-hoc-signed build is asked for permission on
+/// *every* build. The GUI spawns the CLI per request, so that prompt storm made
+/// the tool unusable. A `0600` file in the user's profile has no such problem.
 ///
-/// Reads the data key, creating it when missing. `exclusive` is run before a
-/// new key is generated and must return a guard that serializes creation
-/// across processes; see [`open_encrypted`].
-fn data_key_with<G>(exclusive: impl FnOnce() -> Result<G>) -> Result<[u8; 32]> {
-    let entry = keyring::Entry::new(DATA_KEY_SERVICE, DATA_KEY_ACCOUNT).map_err(to_error)?;
-    match read_data_key(&entry)? {
-        Some(key) => Ok(key),
-        None => {
-            let _guard = exclusive()?;
-            // Another process may have created the key while we waited.
-            if let Some(key) = read_data_key(&entry)? {
-                return Ok(key);
-            }
-            let key = random_key();
-            entry
-                .set_password(&BASE64.encode(key))
-                .map_err(to_error)?;
-            // Use what the store actually holds, never the local copy, so a
-            // process can only ever encrypt with the key that persisted.
-            read_data_key(&entry)?.ok_or_else(|| {
-                RelayError::Credential("the vault key was not persisted".into())
-            })
-        }
+/// `TURNOUT_CREDENTIALS=keyring` still stores the key in the OS credential
+/// service for users who prefer it; the file is used when it exists so an
+/// existing install never prompts again.
+fn data_key_at(key_path: &Path) -> Result<[u8; 32]> {
+    if let Some(key) = read_key_file(key_path)? {
+        return Ok(key);
     }
+    let lock_path = PathBuf::from(format!("{}.key-lock", key_path.display()));
+    let _guard = CreationLock::acquire(lock_path)?;
+    // Another process may have created the key while we waited.
+    if let Some(key) = read_key_file(key_path)? {
+        return Ok(key);
+    }
+    let key = random_key();
+    write_key_file(key_path, &key)?;
+    Ok(key)
 }
 
-fn read_data_key(entry: &keyring::Entry) -> Result<Option<[u8; 32]>> {
-    match entry.get_password() {
-        Ok(encoded) => {
-            let bytes = BASE64
-                .decode(encoded.trim())
-                .map_err(|_| RelayError::Credential("stored vault key is not valid base64".into()))?;
-            let key = bytes.try_into().map_err(|_| {
-                RelayError::Credential("stored vault key has the wrong length".into())
-            })?;
-            Ok(Some(key))
-        }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(to_error(error)),
-    }
+fn read_key_file(path: &Path) -> Result<Option<[u8; 32]>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(RelayError::io(path, error)),
+    };
+    let bytes = BASE64
+        .decode(text.trim())
+        .map_err(|_| RelayError::Credential("the vault key file is not valid base64".into()))?;
+    bytes
+        .try_into()
+        .map(Some)
+        .map_err(|_| RelayError::Credential("the vault key file has the wrong length".into()))
+}
+
+fn write_key_file(path: &Path, key: &[u8; 32]) -> Result<()> {
+    relay_config::write_file(path, &format!("{}\n", BASE64.encode(key)))?;
+    // Owner-only from the first byte; on Windows this applies the profile ACL.
+    relay_config::perms::owner_only(path, false)?;
+    Ok(())
 }
 
 /// Cross-process lock held while the data key is created.
 ///
 /// The desktop UI starts several CLI processes at once. Without this, two of
-/// them on a fresh install could each create a key; the one that lost the
-/// race would encrypt `vault.json` with a key that no longer exists.
+/// them on a fresh install could each create a key; the one that lost the race
+/// would seal `vault.json` with a key that no longer exists.
 struct CreationLock(PathBuf);
 
 impl CreationLock {
@@ -329,15 +327,69 @@ fn random_key() -> [u8; 32] {
     key
 }
 
-/// Open the default store: `vault.json` encrypted with the OS-held data key.
+/// Key held in the OS credential service (opt-in).
+fn data_key_from_os() -> Result<[u8; 32]> {
+    let entry = keyring::Entry::new(DATA_KEY_SERVICE, DATA_KEY_ACCOUNT).map_err(to_error)?;
+    match read_data_key(&entry)? {
+        Some(key) => Ok(key),
+        None => {
+            let key = random_key();
+            entry
+                .set_password(&BASE64.encode(key))
+                .map_err(to_error)?;
+            read_data_key(&entry)?.ok_or_else(|| {
+                RelayError::Credential("the vault key was not persisted".into())
+            })
+        }
+    }
+}
+
+fn read_data_key(entry: &keyring::Entry) -> Result<Option<[u8; 32]>> {
+    match entry.get_password() {
+        Ok(encoded) => {
+            let bytes = BASE64
+                .decode(encoded.trim())
+                .map_err(|_| RelayError::Credential("stored vault key is not valid base64".into()))?;
+            let key = bytes.try_into().map_err(|_| {
+                RelayError::Credential("stored vault key has the wrong length".into())
+            })?;
+            Ok(Some(key))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(to_error(error)),
+    }
+}
+
+/// Open the default store: `vault.json` sealed with the local data key.
 ///
-/// Falls back to the passphrase vault only when the OS credential service
-/// cannot store the data key, and to the plain file store only when
-/// `TURNOUT_CREDENTIALS=file` is set explicitly.
-pub fn open_encrypted(vault_path: impl Into<PathBuf>) -> Result<Box<dyn CredentialStore>> {
+/// `key_path` is where the `0600` data-key file lives; `use_os_store` keeps the
+/// key in the OS credential service instead (opt-in).
+pub fn open_encrypted(
+    vault_path: impl Into<PathBuf>,
+    key_path: impl Into<PathBuf>,
+    use_os_store: bool,
+) -> Result<Box<dyn CredentialStore>> {
     let path = vault_path.into();
-    let lock = PathBuf::from(format!("{}.key-lock", path.display()));
-    let key = data_key_with(|| CreationLock::acquire(lock))?;
+    let key_path = key_path.into();
+    let key = if use_os_store {
+        data_key_from_os()?
+    } else if let Some(key) = read_key_file(&key_path)? {
+        key
+    } else if path.exists() {
+        // An existing vault was sealed with a key from an older build that kept
+        // it in the OS credential service. Recover it once and persist it to the
+        // file, so the upgrade neither loses keys nor prompts again.
+        let key = data_key_from_os().map_err(|error| {
+            RelayError::Credential(format!(
+                "{} exists but its key could not be recovered ({error});                  set TURNOUT_CREDENTIALS=keyring to keep using the OS-held key",
+                path.display()
+            ))
+        })?;
+        write_key_file(&key_path, &key)?;
+        key
+    } else {
+        data_key_at(&key_path)?
+    };
     Ok(Box::new(Vault::open_with_key(path, key)?))
 }
 

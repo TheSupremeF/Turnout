@@ -1,8 +1,12 @@
-# Turnout
+<p align="center">
+  <img src="turnout-logo.svg" width="120" alt="Turnout" />
+</p>
+
+<h1 align="center">Turnout</h1>
 
 Turnout routes any OpenAI-compatible or Anthropic-compatible provider into Codex,
 Claude Code and OpenCode. It is a standalone Rust CLI (with a full-screen
-terminal UI) plus a Vite/React prototype of the future desktop app.
+terminal UI) plus a desktop app (Electron) and a Vite/React web build.
 
 The name is the railway switch ("makas"): every harness is pointed at the
 provider you choose, with one config plan per change.
@@ -11,11 +15,35 @@ provider you choose, with one config plan per change.
 
 ```sh
 cargo build --release          # target/release/turnout
-npm install && npm run dev     # GUI prototype (calls the built CLI)
+npm install && npm run dev     # web GUI in a browser
+npm run electron               # desktop app (builds first, then opens)
+npm run electron:build         # packaged app (installer + portable, per OS)
 ```
 
-No Node, Python or vendor SDK is needed at runtime. Ports are fixed
-(`47821`, plus one per harness) because harness configs embed the gateway URL.
+No Node, Python or vendor SDK is needed at runtime for the CLI. The desktop app
+bundles the GUI and drives the CLI; it expects `turnout` beside the executable
+or on `PATH`.
+
+Ports are fixed (`47821`, plus one per harness) because harness configs embed
+the gateway URL.
+
+## Desktop app (Electron)
+
+`npm run electron` opens the GUI in a native window. The renderer never spawns
+processes: `electron/main.mjs` starts a loopback HTTP server on an ephemeral
+port that serves the same `/api/turnout/*` bridge the dev server uses, and the
+window loads it. Both front ends share `scripts/turnout-bridge.mjs`, so a change
+to the API is made once.
+
+The window has no Node integration, no remote module and a strict
+Content-Security-Policy; navigation and new windows are denied. The bridge is
+bound to `127.0.0.1` and keeps the same `Origin`/`Host` allowlist as the browser
+build (see `scripts/bridge-guard.mjs`), because anything that can reach it can
+rewrite every harness config on the machine.
+
+`npm run electron:build` produces an installer with electron-builder. Packaging
+is unsigned by default; add signing credentials to the environment for
+distribution.
 
 ## Usage
 

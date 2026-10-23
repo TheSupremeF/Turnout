@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LANGUAGES, translate } from "./i18n";
+import { TurnoutSymbol } from "../scripts/logo.mjs";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
@@ -357,20 +358,15 @@ function TopBar({ onSearch, page, agentRunning }) {
 }
 
 function TurnoutLogo({ size = 78 }) {
+  // The mark lives in `scripts/logo.mjs` so the GUI, the app icon and the
+  // README cannot drift apart.
   return (
-    <svg width={size} height={size} viewBox="0 0 512 512" role="img" aria-label="Turnout" style={{ display: "block", flex: "0 0 auto" }}>
-      <g transform="rotate(-90 256 256)">
-        <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="32">
-          <path d="M104 328H408" stroke="#E5E9F0" />
-          <path d="M104 328H196C290 328 306 184 408 184" stroke="#6EA0FF" />
-        </g>
-        <g fill="#14233F" strokeWidth="16">
-          <circle cx="104" cy="328" r="26" stroke="#E5E9F0" />
-          <circle cx="408" cy="328" r="26" stroke="#E5E9F0" />
-          <circle cx="408" cy="184" r="26" stroke="#6EA0FF" />
-        </g>
-      </g>
-    </svg>
+    <span
+      className="turnout-logo"
+      style={{ width: size, height: size, display: "block" }}
+      aria-hidden="true"
+      dangerouslySetInnerHTML={{ __html: TurnoutSymbol({ size, ink: "dark" }) }}
+    />
   );
 }
 

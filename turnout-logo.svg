@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Turnout">
+<rect width="512" height="512" rx="112" fill="#F4F5F8" />
+  <g transform="rotate(-90 256 256)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="32">
+    <path d="M104 328H408" stroke="#1B2B4A" />
+    <path d="M104 328H196C290 328 306 184 408 184" stroke="#2F6BFF" />
+  </g>
+  <g>
+    <circle cx="104" cy="328" r="26" fill="#F4F5F8" stroke="#1B2B4A" stroke-width="16" />
+    <circle cx="408" cy="328" r="26" fill="#F4F5F8" stroke="#1B2B4A" stroke-width="16" />
+    <circle cx="408" cy="184" r="26" fill="#F4F5F8" stroke="#2F6BFF" stroke-width="16" />
+  </g>
+</svg>

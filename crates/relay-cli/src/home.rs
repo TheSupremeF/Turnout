@@ -138,6 +138,15 @@ impl Home {
     pub fn vault(&self) -> PathBuf {
         self.root.join("vault.json")
     }
+
+    /// Owner-only file holding the key that seals [`Home::vault`].
+    ///
+    /// A file, not an OS credential item: macOS ties a Keychain entry to the
+    /// binary's code signature, so every rebuild would be asked for permission
+    /// again — and the GUI spawns the CLI per request.
+    pub fn vault_key(&self) -> PathBuf {
+        self.root.join("vault.key")
+    }
     fn providers_file(&self) -> PathBuf {
         self.root.join("providers.json")
     }

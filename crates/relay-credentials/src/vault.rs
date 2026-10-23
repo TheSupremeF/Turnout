@@ -34,14 +34,22 @@ struct VaultFile {
     created_unix: u64,
 }
 
+/// Where the sealing key came from, for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeySource {
+    /// Owner-only key file beside the vault (the default).
+    ProtectedFile,
+    /// Argon2id derivation from a master passphrase.
+    Passphrase,
+}
+
 pub struct Vault {
     path: PathBuf,
     key: Option<Zeroizing<[u8; 32]>>,
     salt: [u8; 32],
     created_unix: u64,
-    /// True when the key came from the OS credential service rather than a
-    /// passphrase; only affects the reported backend name.
-    os_key: bool,
+    /// How the sealing key was obtained; only affects the reported name.
+    key_source: KeySource,
 }
 
 impl Vault {
@@ -53,7 +61,7 @@ impl Vault {
             key: None,
             salt: random_bytes(),
             created_unix: now_unix(),
-            os_key: false,
+            key_source: KeySource::Passphrase,
         }
     }
 
@@ -120,7 +128,7 @@ impl Vault {
             key: Some(Zeroizing::new(key)),
             salt: random_bytes(),
             created_unix: now_unix(),
-            os_key: true,
+            key_source: KeySource::ProtectedFile,
         };
         if path.exists() {
             let file = vault.read_file()?;
@@ -237,10 +245,9 @@ fn now_unix() -> u64 {
 
 impl CredentialStore for Vault {
     fn name(&self) -> &'static str {
-        if self.os_key {
-            "vault (OS-held key)"
-        } else {
-            "vault (passphrase)"
+        match self.key_source {
+            KeySource::ProtectedFile => "vault (encrypted, local key)",
+            KeySource::Passphrase => "vault (passphrase)",
         }
     }
 
@@ -344,7 +351,7 @@ mod tests {
             reopened.get(&cred("provider:evren")).unwrap().as_deref(),
             Some("sk-live-xyz")
         );
-        assert_eq!(reopened.name(), "vault (OS-held key)");
+        assert_eq!(reopened.name(), "vault (encrypted, local key)");
 
         // A different key must not silently produce a second vault.
         assert!(Vault::open_with_key(&path, [9u8; 32]).is_err());

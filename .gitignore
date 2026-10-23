@@ -13,3 +13,9 @@ HANDOFF.md
 
 # Local release staging.
 dist-release/
+
+# Packaged Electron output and generated icons.
+dist/electron/
+dist/release/
+build/icon.png
+electron/icon.png
