@@ -1,0 +1,14 @@
+[package]
+name = "harness-opencode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+relay-core.workspace = true
+relay-config.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

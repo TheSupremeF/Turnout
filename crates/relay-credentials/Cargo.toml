@@ -1,0 +1,31 @@
+[package]
+name = "relay-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OS credential stores (Keychain / Credential Manager / Secret Service) plus an Argon2id + XChaCha20-Poly1305 encrypted local vault"
+
+[dependencies]
+relay-core.workspace = true
+relay-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+dirs.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[dev-dependencies]
+tempfile.workspace = true

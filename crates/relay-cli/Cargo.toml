@@ -1,0 +1,39 @@
+[package]
+name = "relay-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone Turnout CLI sharing the desktop core"
+
+[[bin]]
+name = "turnout"
+path = "src/main.rs"
+
+[dependencies]
+relay-core.workspace = true
+relay-config.workspace = true
+relay-credentials.workspace = true
+relay-gateway.workspace = true
+provider-openai.workspace = true
+provider-anthropic.workspace = true
+provider-evren.workspace = true
+harness-codex.workspace = true
+harness-claude.workspace = true
+harness-opencode.workspace = true
+relay-tui.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+serde.workspace = true
+url.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+jsonwebtoken.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

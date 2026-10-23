@@ -1,0 +1,20 @@
+[package]
+name = "relay-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared domain model, adapter traits and raw HTTP/SSE transport for Turnout"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+url.workspace = true
+bytes.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

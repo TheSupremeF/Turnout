@@ -1,0 +1,18 @@
+[package]
+name = "relay-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lossless config parsing, surgical patching, diff, backup and rollback"
+
+[dependencies]
+relay-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+.DS_Store
+*.log
+
+# Local pre-edit snapshots and Design Arc review state; not part of the product.
+.backups/
+.claude/

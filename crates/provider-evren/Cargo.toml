@@ -1,0 +1,13 @@
+[package]
+name = "provider-evren"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+relay-core.workspace = true
+provider-openai.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio.workspace = true
