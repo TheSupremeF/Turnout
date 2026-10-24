@@ -72,6 +72,20 @@ secret), `vault` (Argon2id passphrase via `TURNOUT_VAULT_PASSWORD`), or `file`
 Upgrading from a build that used the plain file encrypts the keys on first run
 and renames the old file to `credentials.json.imported`.
 
+## Logo
+
+`icon.svg` is the source artwork. It styles itself with CSS classes and a
+`prefers-color-scheme` block, so `scripts/build-logo.mjs` resolves that into
+plain attributes with colour tokens (`scripts/logo-artwork.mjs`); the class
+names would otherwise collide with the app's stylesheet and resvg would ignore
+the dark palette. `scripts/logo.mjs` is the only consumer.
+
+After changing the artwork:
+
+```sh
+node scripts/build-logo.mjs && node scripts/generate-assets.mjs
+```
+
 ## Tests
 
 ```sh

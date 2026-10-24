@@ -365,7 +365,10 @@ function TurnoutLogo({ size = 78 }) {
       className="turnout-logo"
       style={{ width: size, height: size, display: "block" }}
       aria-hidden="true"
-      dangerouslySetInnerHTML={{ __html: TurnoutSymbol({ size }) }}
+      // Light palette deliberately: the pale tile is the only variant with
+      // enough contrast against the dark rail. `scheme: "dark"` nearly
+      // disappears there and the untitled mark reads weaker still.
+      dangerouslySetInnerHTML={{ __html: TurnoutSymbol({ size, scheme: "light" }) }}
     />
   );
 }

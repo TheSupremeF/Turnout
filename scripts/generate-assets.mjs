@@ -27,8 +27,10 @@ function render(svg, width) {
     .asPng();
 }
 
-// The artwork carries its own navy tile, so no backdrop is added here.
-const square = turnoutLogoSvg({ tile: true });
+// The artwork carries its own tile, so no backdrop is added here. The icon is
+// rendered in the light palette: a launcher icon sits on an unknown desktop
+// background, so it must not depend on the viewer's colour scheme.
+const square = turnoutLogoSvg({ scheme: "light" });
 
 mkdirSync(path.join(root, "build"), { recursive: true });
 writeFileSync(path.join(root, "build", "icon.png"), render(square, 1024));
@@ -38,5 +40,9 @@ writeFileSync(path.join(root, "electron", "icon.png"), render(square, 512));
 writeFileSync(path.join(root, "turnout-logo.svg"), square);
 // Tray/rail variant with no tile, for surfaces that supply their own backdrop.
 writeFileSync(path.join(root, "turnout-logo-mark.svg"), turnoutLogoSvg({ tile: false }));
+writeFileSync(path.join(root, "turnout-logo-dark.svg"), turnoutLogoSvg({ scheme: "dark" }));
 
-console.log("Wrote build/icon.png, electron/icon.png, turnout-logo.svg, turnout-logo-mark.svg");
+console.log(
+  "Wrote build/icon.png, electron/icon.png, turnout-logo.svg, " +
+    "turnout-logo-dark.svg, turnout-logo-mark.svg",
+);
