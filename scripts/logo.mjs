@@ -1,74 +1,49 @@
-//! The Turnout symbol, in one place.
-//!
-//! A railway turnout ("makas"): one track arrives, splits, and the switch
-//! decides which branch every train takes — exactly what the product does to a
-//! model request.
-//!
-//! Two inks are defined because the mark is used on both surfaces: pale on the
-//! dark GUI rail, dark on the light icon backdrop. Drawing the pale version on
-//! a light background makes the through-track disappear, which is why the ink
-//! is a parameter rather than hardcoded stroke colors.
-//!
-//! Consumed by the GUI (`src/App.jsx`), the Electron icon and the README. Do not
-//! redraw it elsewhere.
+// The Turnout mark, in one place.
+//
+// A railway turnout ("makas"): one track arrives and the switch sends it down
+// one of two branches — what the product does to a model request.
+//
+// The artwork itself is `turnout_ikon.svg` (1024-unit canvas, navy tile, cream
+// track, blue sleepers, orange branch). This module embeds it so the GUI, the
+// app icon, the README and the release assets all render the same drawing.
+// Changing the mark means replacing the SVG and re-running
+// `node scripts/generate-assets.mjs`; do not redraw it here.
 
-const GEOMETRY = {
-  straight: "M104 328H408",
-  branch: "M104 328H196C290 328 306 184 408 184",
-  nodes: [
-    { cx: 104, cy: 328 },
-    { cx: 408, cy: 328 },
-    { cx: 408, cy: 184, accent: true },
-  ],
-  strokeWidth: 32,
-  nodeRadius: 26,
-  nodeStroke: 16,
-};
+/// The icon's own canvas size, in the source artwork's units.
+export const CANVAS = 1024;
 
+/// Colours used by the artwork, for surfaces that need to match it.
 export const INKS = {
-  /// For the dark sidebar: pale track, blue branch, dark node centers.
-  dark: { base: "#E5E9F0", accent: "#6EA0FF", fill: "#14233F" },
-  /// For light backgrounds (icon, README on white, printed docs).
-  light: { base: "#1B2B4A", accent: "#2F6BFF", fill: "#F4F5F8" },
+  tile: "#132f5f",
+  track: "#f4f1ea",
+  sleeper: "#5a7bb0",
+  branch: "#f7983d",
 };
 
-/// The drawing without an outer `<svg>`; assumes a 0 0 512 512 viewBox.
-export function TurnoutSymbolBody({ ink = "dark" } = {}) {
-  const colors = INKS[ink] || INKS.dark;
-  const nodes = GEOMETRY.nodes
-    .map((node) => {
-      const stroke = node.accent ? colors.accent : colors.base;
-      return `<circle cx="${node.cx}" cy="${node.cy}" r="${GEOMETRY.nodeRadius}" fill="${colors.fill}" stroke="${stroke}" stroke-width="${GEOMETRY.nodeStroke}" />`;
-    })
-    .join("\n    ");
-  return `  <g transform="rotate(-90 256 256)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="${GEOMETRY.strokeWidth}">
-    <path d="${GEOMETRY.straight}" stroke="${colors.base}" />
-    <path d="${GEOMETRY.branch}" stroke="${colors.accent}" />
-  </g>
-  <g>
-    ${nodes}
-  </g>`;
-}
+/// Everything inside the source `<svg>`: the rounded tile and the drawing.
+const ARTWORK = `
+  <defs><clipPath id="ikon"><rect width="1024" height="1024" rx="228"/></clipPath></defs>
+    <g clip-path="url(#ikon)">
+      <rect width="1024" height="1024" fill="#132f5f"/>
+      <g transform="translate(512 512) scale(0.39576) translate(-1174.0 -650.7)"><path fill="#5a7bb0" d="M591.8 145.5 L644.8 145.5 L644.8 80.0 L591.8 80.0ZM1139.6 145.5 L1139.6 80.0 L1086.6 80.0 L1086.6 145.5ZM962.9 145.5 L1015.9 145.5 L1015.9 80.0 L962.9 80.0ZM839.2 145.5 L892.2 145.5 L892.2 80.0 L839.2 80.0ZM768.5 80.0 L715.5 80.0 L715.5 145.5 L768.5 145.5ZM468.1 145.5 L521.1 145.5 L521.1 80.0 L468.1 80.0ZM344.4 145.5 L397.4 145.5 L397.4 80.0 L344.4 80.0ZM150.0 145.5 L150.0 80.0 L97.0 80.0 L97.0 145.5ZM273.7 145.5 L273.7 80.0 L220.7 80.0 L220.7 145.5ZM839.2 249.3 L867.7 259.0 L892.2 268.3 L892.2 202.5 L839.2 202.5ZM962.9 279.1 L1015.9 295.9 L1015.9 202.5 L962.9 202.5ZM97.0 325.5 L150.0 325.5 L150.0 241.0 L97.0 241.0ZM273.7 241.2 L220.7 241.2 L220.7 325.5 L273.7 325.5ZM397.4 241.7 L344.4 241.2 L344.4 325.5 L397.4 325.5ZM521.1 247.5 L468.1 244.0 L468.1 325.5 L521.1 325.5ZM634.3 260.4 L591.8 254.6 L591.8 325.5 L644.8 325.5 L644.8 262.1ZM962.9 424.5 L1015.9 439.4 L1015.9 388.1 L962.9 385.5ZM220.7 424.5 L220.7 492.0 L273.7 492.0 L273.7 424.5ZM521.1 424.5 L468.1 424.5 L468.1 492.0 L521.1 492.0ZM397.4 424.5 L344.4 424.5 L344.4 492.0 L397.4 492.0ZM150.0 424.5 L97.0 424.5 L97.0 492.0 L150.0 492.0ZM644.8 428.2 L591.8 425.4 L591.8 492.0 L644.8 492.0ZM768.5 442.1 L715.5 434.9 L715.5 492.0 L768.5 492.0ZM892.2 465.8 L839.2 454.4 L839.2 540.7 L892.2 540.7ZM1015.9 498.9 L962.9 483.6 L962.9 571.4 L1015.9 571.4ZM1263.4 80.0 L1210.4 80.0 L1210.4 145.5 L1263.4 145.5ZM1387.1 145.5 L1387.1 80.0 L1334.1 80.0 L1334.1 145.5ZM1705.2 145.5 L1758.2 145.5 L1758.2 80.0 L1705.2 80.0ZM1457.8 145.5 L1510.8 145.5 L1510.8 80.0 L1457.8 80.0ZM1581.5 145.5 L1634.5 145.5 L1634.5 80.0 L1581.5 80.0ZM1086.6 317.1 L1139.6 331.7 L1139.6 202.5 L1086.6 202.5ZM1245.3 356.9 L1248.1 358.6 L1250.3 361.1 L1251.6 364.0 L1252.0 367.5 L1263.4 367.5 L1263.4 202.5 L1210.4 202.5 L1210.4 349.1ZM1334.1 367.5 L1387.1 367.5 L1387.1 202.5 L1334.1 202.5ZM1705.2 367.5 L1758.2 367.5 L1758.2 202.5 L1705.2 202.5ZM1457.8 367.5 L1510.8 367.5 L1510.8 202.5 L1457.8 202.5ZM1634.5 367.5 L1634.5 202.5 L1581.5 202.5 L1581.5 367.5ZM1705.2 424.5 L1705.2 492.0 L1758.2 492.0 L1758.2 424.5ZM1482.2 515.8 L1535.8 544.8 L1569.9 481.8 L1516.2 452.8 L1510.8 462.9 L1510.8 424.5 L1457.8 424.5 L1457.8 492.0 L1495.0 492.0ZM1634.5 424.5 L1581.5 424.5 L1581.5 492.0 L1634.5 492.0ZM1139.6 541.3 L1086.6 522.0 L1086.6 611.1 L1139.6 611.1ZM1608.9 586.5 L1661.3 617.8 L1698.1 556.4 L1645.8 525.0ZM1508.7 594.9 L1455.0 566.0 L1430.8 610.8 L1484.5 639.8ZM1263.4 592.5 L1210.4 569.5 L1210.4 659.8 L1263.4 659.8ZM1631.9 666.7 L1579.6 635.3 L1553.3 679.1 L1605.7 710.4ZM1457.4 690.0 L1403.7 661.0 L1366.0 730.8 L1419.6 759.8ZM1751.7 742.9 L1700.5 709.6 L1672.7 752.3 L1723.8 785.6ZM1576.3 759.3 L1524.0 727.9 L1483.2 796.0 L1535.5 827.4ZM1692.7 833.4 L1641.6 800.1 L1598.3 866.6 L1649.4 899.9ZM1806.8 911.2 L1756.7 876.5 L1711.4 941.7 L1761.5 976.5ZM1828.9 145.5 L1881.9 145.5 L1881.9 80.0 L1828.9 80.0ZM2200.0 145.5 L2253.0 145.5 L2253.0 80.0 L2200.0 80.0ZM1952.6 145.5 L2005.6 145.5 L2005.6 80.0 L1952.6 80.0ZM2129.3 145.5 L2129.3 80.0 L2076.3 80.0 L2076.3 145.5ZM1881.9 367.5 L1881.9 202.5 L1828.9 202.5 L1828.9 367.5ZM1952.6 367.5 L2005.6 367.5 L2005.6 202.5 L1952.6 202.5ZM2200.0 367.5 L2253.0 367.5 L2253.0 202.5 L2200.0 202.5ZM2076.3 367.5 L2129.3 367.5 L2129.3 202.5 L2076.3 202.5ZM1881.9 424.5 L1828.9 424.5 L1828.9 492.0 L1881.9 492.0ZM2253.0 424.5 L2200.0 424.5 L2200.0 492.0 L2253.0 492.0ZM2005.6 424.5 L1952.6 424.5 L1952.6 492.0 L2005.6 492.0ZM2129.3 424.5 L2076.3 424.5 L2076.3 492.0 L2129.3 492.0ZM1731.6 661.8 L1782.8 695.1 L1821.8 635.1 L1770.7 601.8ZM1850.8 740.9 L1900.9 775.7 L1941.8 716.9 L1891.7 682.1ZM1966.9 822.5 L2016.2 858.4 L2058.3 800.5 L2008.9 764.6ZM1868.4 822.5 L1818.3 787.7 L1789.2 829.6 L1839.4 864.4ZM2080.4 905.7 L2129.3 942.1 L2172.1 884.8 L2123.2 848.3ZM1982.8 904.5 L1933.4 868.7 L1903.4 909.9 L1952.8 945.8ZM2240.9 1025.8 L2283.8 968.6 L2235.0 932.0 L2192.1 989.2ZM2095.3 987.8 L2046.4 951.4 L2015.9 992.2 L2064.8 1028.7ZM1919.3 991.9 L1869.9 956.1 L1823.3 1020.3 L1872.6 1056.2ZM2127.3 1075.5 L2176.0 1112.2 L2206.7 1071.4 L2157.9 1034.8ZM2030.7 1074.4 L1981.8 1037.9 L1934.3 1101.6 L1983.2 1138.1ZM2045.3 1184.7 L2094.1 1221.3 L2141.8 1157.8 L2093.0 1121.1Z"/><path fill="#f4f1ea" d="M42.0 191.5 L2306.0 191.5 L2306.0 156.5 L42.0 156.5ZM1066.5 379.5 L1066.0 377.0 L1042.0 360.1 L1018.0 344.4 L992.0 328.7 L970.0 316.5 L946.0 304.2 L924.0 293.8 L900.0 283.4 L878.0 274.6 L854.0 265.8 L830.0 257.9 L804.0 250.0 L778.0 243.0 L752.0 236.7 L724.0 230.6 L696.0 225.3 L670.0 220.9 L642.0 216.8 L614.0 213.3 L584.0 210.0 L552.0 207.1 L520.0 204.7 L486.0 202.6 L450.0 200.9 L394.0 199.0 L334.0 198.0 L44.0 198.0 L44.0 230.2 L72.0 230.0 L346.0 230.2 L394.0 230.6 L436.0 231.6 L488.0 234.1 L540.0 238.0 L594.0 243.7 L616.0 246.6 L638.0 249.9 L670.0 255.6 L700.0 262.2 L730.0 270.0 L762.0 279.7 L796.0 291.1 L830.0 303.6 L868.0 318.7 L910.5 336.5 L44.0 336.5 L44.0 370.5 L890.0 371.0ZM1242.2 378.5 L1236.3 379.2 L1230.6 380.9 L1225.9 383.0 L1221.0 386.3 L1216.6 390.4 L1213.4 394.4 L1210.5 399.5 L1208.4 405.1 L1207.2 410.9 L1207.1 416.9 L1207.8 422.8 L1209.3 427.7 L1211.8 433.1 L1215.2 438.0 L1218.7 441.8 L1223.4 445.5 L1229.4 448.7 L1260.5 461.5 L1294.9 476.3 L1342.1 497.7 L1396.3 523.7 L1451.6 551.8 L1508.0 582.0 L1565.4 614.3 L1622.0 647.8 L1681.3 684.4 L1738.1 720.8 L1797.6 760.3 L1858.0 801.8 L1921.0 846.3 L1981.7 890.1 L2050.0 940.3 L2266.5 1102.5 L2287.5 1074.5 L2070.8 912.2 L2004.0 863.0 L1943.0 819.0 L1879.7 774.2 L1818.9 732.5 L1760.7 693.8 L1703.5 657.0 L1643.6 620.0 L1586.5 586.1 L1530.3 554.3 L1473.4 523.6 L1419.3 496.0 L1366.4 470.4 L1334.0 455.4 L1303.2 441.7 L1272.2 428.4 L1242.9 416.4 L1242.2 415.8 L1242.0 415.0 L1242.5 413.9 L1243.7 413.5 L2306.0 413.5 L2306.0 378.5ZM544.0 413.5 L587.4 414.2 L630.9 416.3 L674.2 419.6 L717.5 424.1 L760.7 429.8 L805.6 437.0 L850.3 445.4 L894.8 455.1 L939.1 465.9 L985.0 478.3 L1028.7 491.3 L1073.9 506.0 L1118.8 521.8 L1165.2 539.3 L1211.2 557.9 L1256.8 577.5 L1305.5 599.8 L1355.6 624.0 L1405.1 649.3 L1454.2 675.6 L1504.5 703.9 L1555.9 734.1 L1608.6 766.2 L1660.7 799.3 L1710.7 832.1 L1763.5 867.8 L1819.2 906.4 L1876.0 946.9 L1932.6 988.0 L1993.6 1033.0 L2190.4 1180.5 L2211.4 1152.5 L2065.8 1043.2 L1992.0 988.2 L1919.2 934.9 L1854.1 888.2 L1786.6 841.2 L1721.7 797.4 L1659.4 756.9 L1599.7 719.7 L1537.6 682.6 L1506.2 664.6 L1476.3 647.9 L1446.3 631.5 L1416.0 615.5 L1385.6 599.9 L1354.9 584.7 L1324.1 569.9 L1294.8 556.3 L1265.4 543.1 L1235.8 530.3 L1206.0 517.9 L1176.1 506.0 L1145.9 494.5 L1117.5 484.1 L1089.0 474.2 L1062.1 465.3 L1035.2 456.7 L1008.2 448.6 L981.0 440.8 L953.7 433.5 L926.3 426.6 L900.7 420.5 L873.1 414.4 L847.4 409.1 L819.6 403.9 L793.7 399.5 L767.7 395.4 L741.7 391.8 L715.6 388.6 L689.5 385.8 L655.2 382.9 L622.9 380.7 L590.6 379.3 L558.2 378.6 L44.0 378.5 L44.0 413.5Z"/><path fill="#f7983d" d="M936.0 282.0 L962.4 294.8 L988.5 308.9 L1014.3 324.1 L1046.2 344.5 L1071.5 361.7 L1102.8 384.0 L1140.0 411.7 L1189.0 449.0 L1184.5 443.6 L1182.7 440.8 L1179.6 435.1 L1177.5 429.2 L1176.8 426.2 L1176.0 420.2 L1176.0 414.2 L1177.5 405.4 L1179.4 399.7 L1183.5 391.5 L1189.0 384.2 L1193.4 379.8 L1201.0 374.1 L1206.7 371.1 L1212.8 368.7 L1216.0 367.8 L1222.8 366.5 L1229.8 366.0 L1233.5 366.1 L1241.0 367.0 L1210.0 360.3 L1171.5 351.2 L1140.7 343.4 L1102.4 333.0 L1064.3 322.0 L1026.3 310.6Z"/></g>
+    </g>`;
 
 /// A complete `<svg>` element, for inline use (the GUI, the app icon).
-export function TurnoutSymbol({ size = 78, title = "Turnout", ink = "dark" } = {}) {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 512 512" role="img" aria-label="${title}">
-${TurnoutSymbolBody({ ink })}
+export function TurnoutSymbol({ size = 78, title = "Turnout" } = {}) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${CANVAS} ${CANVAS}" role="img" aria-label="${title}">${ARTWORK}
 </svg>`;
 }
 
 /// A standalone SVG document, for `turnout-logo.svg` and icon rendering.
-export function turnoutLogoSvg({ size = 512, ink = "light", background = null } = {}) {
-  const backdrop = background
-    ? `<rect width="512" height="512" rx="112" fill="${background}" />`
-    : "";
+///
+/// `tile: false` drops the rounded background, for places that supply their
+/// own (a dark sidebar, a printed page).
+export function turnoutLogoSvg({ size = CANVAS, tile = true, title = "Turnout" } = {}) {
+  const artwork = tile
+    ? ARTWORK
+    : ARTWORK.replace(/\s*<rect width="1024" height="1024" fill="#132f5f"\s*\/>/, "");
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 512 512" role="img" aria-label="Turnout">
-${backdrop}
-${TurnoutSymbolBody({ ink })}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS} ${CANVAS}" width="${size}" height="${size}" role="img" aria-label="${title}">${artwork}
 </svg>
 `;
 }
-
-/// Raw geometry for renderers that cannot take SVG markup.
-export const TURNOUT_SYMBOL_PATHS = GEOMETRY;

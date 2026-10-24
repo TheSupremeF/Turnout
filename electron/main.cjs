@@ -113,7 +113,7 @@ function startServer() {
 function setDockIcon() {
   if (process.platform !== "darwin" || !app.dock) return;
   try {
-    const svg = turnoutLogoSvg({ ink: "light", background: "#F4F5F8" });
+    const svg = turnoutLogoSvg({});
     const icon = nativeImage.createFromDataURL(
       `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
     );

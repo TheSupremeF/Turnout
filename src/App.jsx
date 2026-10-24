@@ -365,7 +365,7 @@ function TurnoutLogo({ size = 78 }) {
       className="turnout-logo"
       style={{ width: size, height: size, display: "block" }}
       aria-hidden="true"
-      dangerouslySetInnerHTML={{ __html: TurnoutSymbol({ size, ink: "dark" }) }}
+      dangerouslySetInnerHTML={{ __html: TurnoutSymbol({ size }) }}
     />
   );
 }

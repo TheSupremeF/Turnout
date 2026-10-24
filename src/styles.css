@@ -52,7 +52,9 @@ button { color: inherit; }
 /* icon rail */
 .rail { background: var(--sidebar); display: flex; flex-direction: column; align-items: center; padding: 18px 0 16px; gap: 6px; }
 .rail-logo { width: 78px; height: 78px; display: flex; align-items: center; justify-content: center; margin: -4px 0 14px; }
-.rail-logo svg { display: block; }
+.rail-logo svg { display: block; border-radius: 18px; }
+/* The mark's own tile is navy; a hairline keeps it from melting into the rail. */
+.rail-logo { filter: drop-shadow(0 0 0 1px rgba(255, 255, 255, 0.08)); }
 .rail-btn { display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border-radius: 12px; border: 0; background: transparent; color: #a3abb8; cursor: pointer; }
 .rail-btn:hover { background: var(--sidebar-hover); color: #e5e9f0; }
 .rail-btn.active { background: var(--sidebar-active); color: var(--sidebar-active-ink); }

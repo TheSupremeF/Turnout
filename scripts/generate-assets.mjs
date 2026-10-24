@@ -27,7 +27,8 @@ function render(svg, width) {
     .asPng();
 }
 
-const square = turnoutLogoSvg({ ink: "light", background: "#F4F5F8" });
+// The artwork carries its own navy tile, so no backdrop is added here.
+const square = turnoutLogoSvg({ tile: true });
 
 mkdirSync(path.join(root, "build"), { recursive: true });
 writeFileSync(path.join(root, "build", "icon.png"), render(square, 1024));
@@ -35,6 +36,7 @@ writeFileSync(path.join(root, "build", "icon.png"), render(square, 1024));
 writeFileSync(path.join(root, "electron", "icon.png"), render(square, 512));
 // Docs: the light ink on the app's own backdrop, plus a transparent mark.
 writeFileSync(path.join(root, "turnout-logo.svg"), square);
-writeFileSync(path.join(root, "turnout-logo-mark.svg"), turnoutLogoSvg({ ink: "light" }));
+// Tray/rail variant with no tile, for surfaces that supply their own backdrop.
+writeFileSync(path.join(root, "turnout-logo-mark.svg"), turnoutLogoSvg({ tile: false }));
 
 console.log("Wrote build/icon.png, electron/icon.png, turnout-logo.svg, turnout-logo-mark.svg");
