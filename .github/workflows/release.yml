@@ -1,0 +1,179 @@
+name: Release
+
+# Builds every release file from source on native runners and, for a `v*` tag,
+# publishes them to the GitHub Release `turnout update` reads:
+#
+#   turnout-<os>-<arch>[.exe] + .sha256   CLI, one per platform (the updater's names)
+#   turnout.exe + .sha256                 the Windows CLI under its short name
+#   Turnout-*.dmg / -mac.zip              macOS desktop app (Apple Silicon)
+#   Turnout Setup *.exe / Turnout *.exe   Windows desktop app (installer / portable)
+#
+# Running it by hand (workflow_dispatch) builds and tests everything and keeps
+# the files as workflow artifacts without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: CLI (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: turnout.exe
+            asset: turnout-windows-x86_64.exe
+          - os: macos-14
+            target: aarch64-apple-darwin
+            bin: turnout
+            asset: turnout-macos-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: turnout
+            asset: turnout-linux-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The Linux keyring backend talks to the Secret Service over D-Bus.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        env:
+          # build.rs fails instead of shipping turnout.exe without its icon.
+          TURNOUT_REQUIRE_ICON: ${{ runner.os == 'Windows' && '1' || '' }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p relay-cli --bin turnout
+
+      - name: Smoke test
+        run: |
+          exe="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          version="$("$exe" --version)"
+          echo "$version"
+          # A tag must ship the version it is named after.
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$version" != "turnout ${GITHUB_REF_NAME#v}" ]]; then
+            echo "::error::$GITHUB_REF_NAME builds '$version'; bump the workspace version first"
+            exit 1
+          fi
+          "$exe" --help | grep -q "turnout"
+
+      - name: Stage
+        run: |
+          mkdir -p dist-release
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist-release/${{ matrix.asset }}"
+          cd dist-release
+          if command -v sha256sum >/dev/null; then sum=sha256sum; else sum="shasum -a 256"; fi
+          $sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          cat "${{ matrix.asset }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.asset }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    needs: cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            cli: turnout-macos-arm64
+            bin: turnout
+            files: |
+              dist/electron/*.dmg
+              dist/electron/*.zip
+          - os: windows-latest
+            cli: turnout-windows-x86_64.exe
+            bin: turnout.exe
+            files: dist/electron/*.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The app bundles the CLI built (and tested) by the job above;
+      # scripts/prepare-cli.mjs picks it up from target/release.
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-${{ matrix.cli }}
+          path: cli
+
+      - name: Place the CLI
+        run: |
+          mkdir -p target/release
+          cp "cli/${{ matrix.cli }}" "target/release/${{ matrix.bin }}"
+          chmod +x "target/release/${{ matrix.bin }}"
+
+      - name: Package
+        env:
+          # Unsigned until signing credentials are configured.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run electron:build -- --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [cli, desktop]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Windows CLI under its short name
+        working-directory: release
+        run: |
+          cp turnout-windows-x86_64.exe turnout.exe
+          sha256sum turnout.exe > turnout.exe.sha256
+          ls -l
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Turnout ${TAG#v}" --generate-notes
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
