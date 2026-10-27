@@ -129,11 +129,8 @@ own model, in their own git worktree. For Claude Code the manager is the
 route's default model and each worker is a subagent file Turnout writes:
 
 ```sh
-# Manager: Opus on Claude's own login. Workers may use DeepSeek via EVREN.
-turnout plan-targets claude-code --hybrid \
-  --target anthropic::claude-opus-5-5 --target evren::deepseek-v4.1-flash \
-  --default-target anthropic::claude-opus-5-5
-turnout apply
+# Manager: Opus on Claude's own login. Shows the change and asks first.
+turnout agents manager anthropic::claude-opus-5-5
 
 turnout agents plan deepseek-worker --model evren::deepseek-v4.1-flash --parallel 3
 turnout agents apply             # writes .claude/agents/deepseek-worker.md
@@ -141,7 +138,13 @@ turnout agents list              # manager, workers, and whether each is routabl
 turnout agents rollback          # undo the last agent change
 ```
 
-Any pairing works the same way: make GPT-6 the default target and the workers
+Changing the manager rewrites the Claude Code settings shared by the CLI and
+the VS Code extension, so `agents manager` shows the diff and asks before
+writing; without a terminal it only saves the plan (confirm with
+`turnout apply --harness claude-code`, or pass `--yes`). The worker models must
+already be part of the route (`turnout plan-targets`).
+
+Any pairing works the same way: make GPT-6 the manager and the workers
 DeepSeek, or Opus the default with one GPT-6 and one DeepSeek worker. Turnout
 refuses a worker on a model the route does not serve, never takes over an agent
 file it did not write, and `--scope user` writes to `~/.claude/agents` instead

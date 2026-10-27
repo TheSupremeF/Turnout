@@ -596,6 +596,25 @@ fn agents_put_workers_on_routed_models_and_roll_back() {
     ]);
     assert!(!ok && out.contains("not written by Turnout"), "{out}");
 
+    // Changing the manager rewrites shared Claude Code settings, so it is
+    // never applied without a yes: no terminal and no --yes saves a plan only.
+    let before = std::fs::read_to_string(&settings).unwrap();
+    let (ok, out) = run(&["agents", "manager", "evren::deepseek-v4.1-flash"]);
+    assert!(ok && out.contains("not applied"), "{out}");
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), before);
+    let (_, out) = run(&["agents", "list", "--project", project_arg, "--json"]);
+    assert!(out.contains("\"manager\":\"claude-opus-5-5\""), "{out}");
+    let (ok, out) = run(&["agents", "manager", "evren::deepseek-v4.1-flash", "--yes"]);
+    assert!(ok, "{out}");
+    let (_, out) = run(&["agents", "list", "--project", project_arg, "--json"]);
+    assert!(out.contains("\"manager\":\"deepseek-v4.1-flash\""), "{out}");
+    let (ok, out) = run(&["agents", "manager", "anthropic::claude-opus-5-5", "--yes"]);
+    assert!(ok, "{out}");
+    let (_, out) = run(&["agents", "list", "--project", project_arg, "--json"]);
+    assert!(out.contains("\"manager\":\"claude-opus-5-5\""), "{out}");
+    let (ok, out) = run(&["agents", "manager", "openai::gpt-6.1-sol", "--yes"]);
+    assert!(!ok && out.contains("not part of the claude-code route"), "{out}");
+
     let (ok, out) = run(&["agents", "rollback"]);
     assert!(ok, "{out}");
     assert!(!worker.exists(), "rolling back a new worker removes it");

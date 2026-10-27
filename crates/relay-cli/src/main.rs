@@ -277,6 +277,17 @@ enum AgentsCmd {
         #[arg(long, conflicts_with = "model")]
         remove: bool,
     },
+    /// Change which model manages the workers (the claude-code route's
+    /// default). Shows the change and asks before writing anything.
+    Manager {
+        /// provider::model, e.g. anthropic::claude-opus-5-5 or a target of
+        /// the route such as openai::gpt-6.1-sol
+        model: String,
+        /// Apply without asking (for scripts and the desktop app, which ask
+        /// in their own UI)
+        #[arg(long)]
+        yes: bool,
+    },
     /// Apply the saved agent plan (with backup)
     Apply,
     /// Undo an agent change (latest when no id is given)
@@ -3194,7 +3205,93 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
             let diff = plan.diff();
             println!("{}", if diff.trim().is_empty() { "(no changes — already up to date)".to_string() } else { diff });
             println!("\nagent plan saved — run `turnout agents apply` to write it");
+            if let Some(route) = route()? {
+                println!(
+                    "manager: {} (change it with `turnout agents manager <provider::model>`)",
+                    route.model
+                );
+            }
             Ok(())
+        }
+        AgentsCmd::Manager { model, yes } => {
+            let route = route()?.ok_or_else(|| {
+                anyhow!("claude-code has no Turnout route yet; set one up with `turnout plan-targets claude-code ...`")
+            })?;
+            let (provider, name) = parse_target(&model)?;
+            let mut targets = route.enabled_targets();
+            let current = route.model.clone();
+            let official = provider == "anthropic";
+            if official && !route.hybrid {
+                bail!("this claude-code route sends everything to the gateway; a Claude model can manage only on a --hybrid route");
+            }
+            if !official && !targets.iter().any(|t| t.provider == provider && t.model == name) {
+                bail!("`{model}` is not part of the claude-code route; add it with `turnout plan-targets` first");
+            }
+            let is_current = targets
+                .iter()
+                .find(|t| t.provider == provider && t.model == name)
+                .map(|t| t.public_model == current)
+                .unwrap_or(name == current);
+            if is_current {
+                println!("`{model}` already manages claude-code; nothing to change");
+                return Ok(());
+            }
+            // Rebuild the route exactly as it is, with only the default changed.
+            if official {
+                targets.retain(|t| t.provider != "anthropic");
+            }
+            let mut values = targets
+                .iter()
+                .map(|t| format!("{}::{}", t.provider, t.model))
+                .collect::<Vec<_>>();
+            if official {
+                values.insert(0, format!("anthropic::{name}"));
+            }
+            let chains = targets
+                .iter()
+                .filter(|t| !t.fallbacks.is_empty())
+                .map(|t| {
+                    let to = t
+                        .fallbacks
+                        .iter()
+                        .filter_map(|public| targets.iter().find(|o| &o.public_model == public))
+                        .map(|o| format!("{}::{}", o.provider, o.model))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{}::{}={to}", t.provider, t.model)
+                })
+                .collect::<Vec<_>>();
+            println!("manager: {current} -> {name}\n");
+            plan_targets(
+                home,
+                HarnessId::CLAUDE_CODE,
+                &values,
+                &format!("{provider}::{name}"),
+                None,
+                None,
+                route.hybrid,
+                route.fallback,
+                &chains,
+            )?;
+            let confirmed = if yes {
+                true
+            } else {
+                use std::io::{BufRead, IsTerminal, Write};
+                if !std::io::stdin().is_terminal() {
+                    println!("not applied: confirm with `turnout apply --harness claude-code`, or rerun with --yes");
+                    return Ok(());
+                }
+                print!("\nMake `{name}` the manager for Claude Code (CLI and VS Code)? [y/N] ");
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "e" | "evet")
+            };
+            if !confirmed {
+                println!("not applied; the route is unchanged (the plan stays saved for `turnout apply`)");
+                return Ok(());
+            }
+            apply(home, Some(HarnessId::CLAUDE_CODE.to_string()))
         }
         AgentsCmd::Apply => {
             let (id, paths) = agents::apply(home)?;
