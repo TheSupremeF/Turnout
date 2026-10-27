@@ -19,3 +19,6 @@ dist/electron/
 dist/release/
 build/icon.png
 electron/icon.png
+
+# Local EVREN web chat (deployed separately to Vercel).
+vercel-upload/
