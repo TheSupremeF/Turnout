@@ -38,6 +38,27 @@ fn config_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The directory holding OpenCode's global config (where `agent/` lives):
+/// the one with an existing config file, else the first candidate.
+pub fn global_config_dir() -> PathBuf {
+    if let Some(file) = std::env::var_os("OPENCODE_CONFIG") {
+        if let Some(parent) = PathBuf::from(file).parent() {
+            return parent.to_path_buf();
+        }
+    }
+    let candidates = config_dirs();
+    candidates
+        .iter()
+        .find(|dir| {
+            ["opencode.json", "opencode.jsonc", "config.json"]
+                .iter()
+                .any(|name| dir.join(name).exists())
+        })
+        .or_else(|| candidates.first())
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 pub struct OpenCodeAdapter {
     id: HarnessId,
     config: PathBuf,

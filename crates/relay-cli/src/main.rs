@@ -156,7 +156,7 @@ enum Cmd {
         #[arg(long)]
         online: bool,
     },
-    /// Worker agents the harness's main model hands work to (Claude Code)
+    /// Worker agents the harness's main model hands work to (Claude Code, OpenCode)
     #[command(subcommand)]
     Agents(AgentsCmd),
     /// Copy this executable to a per-user folder on PATH (re-points the Agent)
@@ -236,6 +236,9 @@ enum ProvidersCmd {
 enum AgentsCmd {
     /// List worker agents and the model that manages them
     List {
+        /// claude-code (default) or opencode
+        #[arg(long, value_enum, default_value_t = agents::Harness::ClaudeCode)]
+        harness: agents::Harness,
         /// Project whose `.claude/agents` to read (default: current directory)
         #[arg(long)]
         project: Option<PathBuf>,
@@ -244,6 +247,9 @@ enum AgentsCmd {
     },
     /// Preview adding, changing or removing a worker (writes nothing)
     Plan {
+        /// claude-code (default) or opencode
+        #[arg(long, value_enum, default_value_t = agents::Harness::ClaudeCode)]
+        harness: agents::Harness,
         /// Agent name the manager calls it by (lowercase, digits, dashes)
         name: String,
         /// Worker model: provider::model from the claude-code route
@@ -280,6 +286,9 @@ enum AgentsCmd {
     /// Change which model manages the workers (the claude-code route's
     /// default). Shows the change and asks before writing anything.
     Manager {
+        /// claude-code (default) or opencode
+        #[arg(long, value_enum, default_value_t = agents::Harness::ClaudeCode)]
+        harness: agents::Harness,
         /// provider::model, e.g. anthropic::claude-opus-5-5 or a target of
         /// the route such as openai::gpt-6.1-sol
         model: String,
@@ -289,7 +298,11 @@ enum AgentsCmd {
         yes: bool,
     },
     /// Apply the saved agent plan (with backup)
-    Apply,
+    Apply {
+        /// claude-code (default) or opencode
+        #[arg(long, value_enum, default_value_t = agents::Harness::ClaudeCode)]
+        harness: agents::Harness,
+    },
     /// Undo an agent change (latest when no id is given)
     Rollback { id: Option<String> },
 }
@@ -466,8 +479,9 @@ async fn run(cli: Cli) -> Result<()> {
                     home.remove_route(&harness)?;
                     println!("saved route for {harness} cleared (there was none before)");
                 }
-                None if agents::is_agents_backup(&home, &id) => {
-                    println!("agent files restored; start a new Claude Code session to load them")
+                None if agents::backup_harness(&home, &id).is_some() => {
+                    let harness = agents::backup_harness(&home, &id).expect("checked above");
+                    println!("agent files restored. {}", agents::reload_hint(harness))
                 }
                 None => println!(
                     "note: this backup predates route tracking; the saved route was left as is"
@@ -3111,30 +3125,43 @@ fn uninstall_agent() -> Result<()> {
 }
 
 fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
-    let route = || -> Result<Option<SavedRoute>> {
-        Ok(home.state()?.routes.get(HarnessId::CLAUDE_CODE).cloned())
+    let route = |harness: agents::Harness| -> Result<Option<SavedRoute>> {
+        Ok(home.state()?.routes.get(harness.id()).cloned())
     };
     match command {
-        AgentsCmd::List { project, json } => {
-            let found = agents::list(home, project.as_deref())?;
-            let manager = route()?.map(|route| route.model);
+        AgentsCmd::List {
+            harness,
+            project,
+            json,
+        } => {
+            let found = agents::list(home, harness, project.as_deref())?;
+            let manager = route(harness)?.map(|route| route.model);
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "harness": HarnessId::CLAUDE_CODE, "manager": manager, "agents": found })
+                    serde_json::json!({ "harness": harness.id(), "manager": manager, "agents": found })
                 );
                 return Ok(());
             }
             match &manager {
-                Some(model) => println!("manager: {model} (claude-code route default; `/model` changes it per session)"),
-                None => println!("manager: Claude Code's own default (no Turnout route for claude-code)"),
+                Some(model) => println!(
+                    "manager: {model} ({} route default; the harness's model picker changes it per session)",
+                    harness.id()
+                ),
+                None => println!(
+                    "manager: the harness's own default (no Turnout route for {})",
+                    harness.id()
+                ),
             }
             if found.is_empty() {
-                println!("no worker agents — try: turnout agents plan deepseek-worker --model evren::deepseek-v4.1-flash");
+                println!(
+                    "no worker agents — try: turnout agents plan deepseek-worker --harness {} --model evren::deepseek-v4.1-flash",
+                    harness.id()
+                );
             }
             for agent in found {
                 println!(
-                    "{:<20} {:<32} {:<8} {}{}",
+                    "{:<20} {:<36} {:<8} {}{}",
                     agent.name,
                     agent.model.as_deref().unwrap_or("(inherits manager)"),
                     agent.scope,
@@ -3145,6 +3172,7 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
             Ok(())
         }
         AgentsCmd::Plan {
+            harness,
             name,
             model,
             scope,
@@ -3158,18 +3186,29 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
             remove,
         } => {
             agents::check_name(&name)?;
-            let path = agents::agents_dir(scope, project.as_deref())?.join(format!("{name}.md"));
+            let path = agents::agents_dir(harness, scope, project.as_deref())?
+                .join(format!("{name}.md"));
             let spec = match model {
                 Some(model) if !remove => {
-                    let route = route()?;
-                    let model = agents::resolve_model(route.as_ref(), &model)?;
-                    let mut spec = agents::AgentSpec::new(&name, &model);
+                    let route = route(harness)?;
+                    let model = agents::resolve_model(harness, route.as_ref(), &model)?;
+                    let mut spec = agents::AgentSpec::new(harness, &name, &model);
                     if let Some(description) = description {
                         spec.description = description;
                     }
                     spec.parallel = parallel;
                     spec.max_turns = Some(max_turns);
-                    spec.worktree = !no_worktree;
+                    if no_worktree {
+                        spec.worktree = false;
+                    } else if !harness.has_worktrees() {
+                        println!(
+                            "note: {} has no worktree isolation; workers share the checkout, so give parallel workers separate files",
+                            harness.id()
+                        );
+                    }
+                    if !tools.is_empty() && harness != agents::Harness::ClaudeCode {
+                        bail!("--tools is only supported for claude-code workers");
+                    }
                     spec.tools = tools;
                     if let Some(file) = instructions_file {
                         spec.instructions = std::fs::read_to_string(&file)
@@ -3178,14 +3217,9 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
                     if parallel.is_some() {
                         // The advisory count is only as good as the provider's
                         // real limit; say so when there is none.
-                        let provider = route.as_ref().and_then(|route| {
-                            route
-                                .enabled_targets()
-                                .into_iter()
-                                .find(|target| target.public_model == model)
-                                .map(|target| target.provider)
-                        });
-                        if let Some(provider) = provider {
+                        if let Some(provider) =
+                            agents::provider_for(harness, route.as_ref(), &model)
+                        {
                             let limited = home
                                 .providers()?
                                 .iter()
@@ -3201,39 +3235,57 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
                 }
                 _ => None,
             };
-            let plan = agents::plan(home, path, spec.as_ref())?;
+            let plan = agents::plan(home, harness, path, spec.as_ref())?;
             let diff = plan.diff();
-            println!("{}", if diff.trim().is_empty() { "(no changes — already up to date)".to_string() } else { diff });
-            println!("\nagent plan saved — run `turnout agents apply` to write it");
-            if let Some(route) = route()? {
+            println!(
+                "{}",
+                if diff.trim().is_empty() {
+                    "(no changes — already up to date)".to_string()
+                } else {
+                    diff
+                }
+            );
+            println!(
+                "\nagent plan saved — run `turnout agents apply --harness {}` to write it",
+                harness.id()
+            );
+            if let Some(route) = route(harness)? {
                 println!(
-                    "manager: {} (change it with `turnout agents manager <provider::model>`)",
-                    route.model
+                    "manager: {} (change it with `turnout agents manager --harness {} <provider::model>`)",
+                    route.model,
+                    harness.id()
                 );
             }
             Ok(())
         }
-        AgentsCmd::Manager { model, yes } => {
-            let route = route()?.ok_or_else(|| {
-                anyhow!("claude-code has no Turnout route yet; set one up with `turnout plan-targets claude-code ...`")
+        AgentsCmd::Manager {
+            harness,
+            model,
+            yes,
+        } => {
+            let id = harness.id();
+            let route = route(harness)?.ok_or_else(|| {
+                anyhow!("{id} has no Turnout route yet; set one up with `turnout plan-targets {id} ...`")
             })?;
             let (provider, name) = parse_target(&model)?;
             let mut targets = route.enabled_targets();
             let current = route.model.clone();
-            let official = provider == "anthropic";
+            // Only Claude Code's hybrid route keeps Claude's own models outside
+            // the route's targets; everything else must be a target.
+            let official = harness == agents::Harness::ClaudeCode && provider == "anthropic";
             if official && !route.hybrid {
                 bail!("this claude-code route sends everything to the gateway; a Claude model can manage only on a --hybrid route");
             }
             if !official && !targets.iter().any(|t| t.provider == provider && t.model == name) {
-                bail!("`{model}` is not part of the claude-code route; add it with `turnout plan-targets` first");
+                bail!("`{model}` is not part of the {id} route; add it with `turnout plan-targets` first");
             }
             let is_current = targets
                 .iter()
                 .find(|t| t.provider == provider && t.model == name)
-                .map(|t| t.public_model == current)
+                .map(|t| t.public_model == current || t.model == current)
                 .unwrap_or(name == current);
             if is_current {
-                println!("`{model}` already manages claude-code; nothing to change");
+                println!("`{model}` already manages {id}; nothing to change");
                 return Ok(());
             }
             // Rebuild the route exactly as it is, with only the default changed.
@@ -3264,7 +3316,7 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
             println!("manager: {current} -> {name}\n");
             plan_targets(
                 home,
-                HarnessId::CLAUDE_CODE,
+                id,
                 &values,
                 &format!("{provider}::{name}"),
                 None,
@@ -3278,10 +3330,14 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
             } else {
                 use std::io::{BufRead, IsTerminal, Write};
                 if !std::io::stdin().is_terminal() {
-                    println!("not applied: confirm with `turnout apply --harness claude-code`, or rerun with --yes");
+                    println!("not applied: confirm with `turnout apply --harness {id}`, or rerun with --yes");
                     return Ok(());
                 }
-                print!("\nMake `{name}` the manager for Claude Code (CLI and VS Code)? [y/N] ");
+                let label = match harness {
+                    agents::Harness::ClaudeCode => "Claude Code (CLI and VS Code)",
+                    agents::Harness::OpenCode => "OpenCode",
+                };
+                print!("\nMake `{name}` the manager for {label}? [y/N] ");
                 std::io::stdout().flush()?;
                 let mut answer = String::new();
                 std::io::stdin().lock().read_line(&mut answer)?;
@@ -3291,16 +3347,16 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
                 println!("not applied; the route is unchanged (the plan stays saved for `turnout apply`)");
                 return Ok(());
             }
-            apply(home, Some(HarnessId::CLAUDE_CODE.to_string()))
+            apply(home, Some(id.to_string()))
         }
-        AgentsCmd::Apply => {
-            let (id, paths) = agents::apply(home)?;
+        AgentsCmd::Apply { harness } => {
+            let (id, paths) = agents::apply(home, harness)?;
             for path in &paths {
                 println!("  {}", path.display());
             }
             println!("applied; backup {id}");
             println!("undo with: turnout agents rollback {id}");
-            println!("Claude Code loads agents when a session starts: open a new session to use the change.");
+            println!("{}", agents::reload_hint(harness));
             Ok(())
         }
         AgentsCmd::Rollback { id } => {
@@ -3309,15 +3365,15 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
                 None => agents::latest_backup(home)?
                     .ok_or_else(|| anyhow!("no agent changes to roll back"))?,
             };
-            if !agents::is_agents_backup(home, &id) {
+            let Some(harness) = agents::backup_harness(home, &id) else {
                 bail!("{id} is not an agent change; use `turnout rollback {id}`");
-            }
+            };
             let restored = BackupStore::at(home.backups()).restore(&id)?;
             println!("restored {} file(s) from {id}", restored.len());
             for path in restored {
                 println!("  {}", path.display());
             }
-            println!("Claude Code loads agents when a session starts: open a new session to see it.");
+            println!("{}", agents::reload_hint(harness));
             Ok(())
         }
     }

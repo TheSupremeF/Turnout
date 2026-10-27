@@ -150,8 +150,18 @@ refuses a worker on a model the route does not serve, never takes over an agent
 file it did not write, and `--scope user` writes to `~/.claude/agents` instead
 of the project. `--parallel` is advice the manager reads; the hard cap is
 `turnout providers limit`. Claude Code loads agents when a session starts, so
-open a new session after a change. Codex and OpenCode workers are not
-supported yet.
+open a new session after a change.
+
+OpenCode works the same with `--harness opencode` on every `agents` command:
+workers go to `.opencode/agent/<name>.md` (or `agent/` in OpenCode's global
+config directory) as `mode: subagent`, with the model spelled the way the
+OpenCode route declares it (`turnout/<model>` through the gateway). OpenCode
+has no worktree isolation, so parallel workers share the checkout and should
+get separate files to change; restart OpenCode to load a change.
+
+Codex needs no worker files: its manager picks a model for each sub-agent it
+spawns, from the models the Codex route already provides, so the route alone
+decides which workers are possible.
 
 Each line in the request log (`requests/<harness>.jsonl` in the data
 directory) records the model that was asked for, the one that answered,

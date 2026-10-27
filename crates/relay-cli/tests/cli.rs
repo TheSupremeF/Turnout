@@ -620,3 +620,65 @@ fn agents_put_workers_on_routed_models_and_roll_back() {
     assert!(!worker.exists(), "rolling back a new worker removes it");
     assert!(project.join(".claude/agents/mine.md").exists());
 }
+
+#[test]
+fn opencode_workers_are_subagents_on_the_gateway_provider() {
+    let env = Env::new();
+    let config = env.home.path().join("opencode").join("opencode.json");
+    let project = env.home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_arg = project.to_str().unwrap();
+    let run = |args: &[&str]| {
+        env.run_with(&[("OPENCODE_CONFIG", config.to_str().unwrap())], args, None)
+    };
+
+    let (ok, out) = run(&["providers", "add", "evren", "--base-url", "https://api.example.test/v1"]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&[
+        "plan-targets", "opencode",
+        "--target", "evren::glm-5.3",
+        "--target", "evren::deepseek-v4.1-flash",
+        "--default-target", "evren::glm-5.3",
+        "--config", config.to_str().unwrap(),
+    ]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["apply", "--harness", "opencode"]);
+    assert!(ok, "{out}");
+
+    let (ok, out) = run(&[
+        "agents", "plan", "deepseek-worker", "--harness", "opencode",
+        "--model", "evren::deepseek-v4.1-flash", "--project", project_arg,
+    ]);
+    assert!(ok, "{out}");
+    // OpenCode reaches every gateway model through the `turnout` provider.
+    assert!(out.contains("+model: \"turnout/deepseek-v4.1-flash\""), "{out}");
+    assert!(out.contains("+mode: subagent"), "{out}");
+    assert!(out.contains("no worktree isolation"), "{out}");
+    let (ok, out) = run(&["agents", "apply", "--harness", "opencode"]);
+    assert!(ok, "{out}");
+    let worker = project.join(".opencode/agent/deepseek-worker.md");
+    assert!(worker.exists());
+
+    let (ok, out) = run(&["agents", "list", "--harness", "opencode", "--project", project_arg, "--json"]);
+    assert!(ok, "{out}");
+    let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(listed["manager"], "glm-5.3", "{listed}");
+    assert_eq!(listed["agents"][0]["name"], "deepseek-worker", "{listed}");
+    assert_eq!(listed["agents"][0]["routable"], true, "{listed}");
+
+    // Claude-only options are refused rather than silently dropped.
+    let (ok, out) = run(&[
+        "agents", "plan", "x", "--harness", "opencode", "--model", "evren::glm-5.3",
+        "--tools", "Read", "--project", project_arg,
+    ]);
+    assert!(!ok && out.contains("only supported for claude-code"), "{out}");
+
+    let (ok, out) = run(&["agents", "manager", "--harness", "opencode", "evren::deepseek-v4.1-flash", "--yes"]);
+    assert!(ok, "{out}");
+    let (_, out) = run(&["agents", "list", "--harness", "opencode", "--project", project_arg, "--json"]);
+    assert!(out.contains("\"manager\":\"deepseek-v4.1-flash\""), "{out}");
+
+    let (ok, out) = run(&["agents", "rollback"]);
+    assert!(ok && out.contains("restart OpenCode"), "{out}");
+    assert!(!worker.exists());
+}
