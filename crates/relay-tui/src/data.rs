@@ -65,6 +65,11 @@ pub struct Selection {
     pub default: Option<Target>,
     /// Claude Code only: keep the built-in model list and append the rest.
     pub hybrid: bool,
+    /// Let every model fall back to the route's other models (off by default).
+    pub fallback: bool,
+    /// Per-model fallback chains, in order. Kept so that re-applying a route
+    /// from the TUI never drops chains set elsewhere.
+    pub chains: BTreeMap<Target, Vec<Target>>,
 }
 
 impl Selection {
@@ -85,6 +90,12 @@ impl Selection {
             if self.default.as_ref() == Some(target) {
                 self.default = None;
             }
+            // A chain can only name models of the route.
+            self.chains.remove(target);
+            for chain in self.chains.values_mut() {
+                chain.retain(|item| item != target);
+            }
+            self.chains.retain(|_, chain| !chain.is_empty());
         } else {
             self.targets.push(target.clone());
         }
@@ -111,6 +122,20 @@ impl Selection {
         args.push(default.arg());
         if self.hybrid {
             args.push("--hybrid".into());
+        }
+        if self.fallback {
+            args.push("--fallback".into());
+        }
+        for (from, to) in &self.chains {
+            let to: Vec<String> = to
+                .iter()
+                .filter(|item| self.targets.contains(item))
+                .map(Target::arg)
+                .collect();
+            if self.targets.contains(from) && !to.is_empty() {
+                args.push("--fallback-chain".into());
+                args.push(format!("{}={}", from.arg(), to.join(",")));
+            }
         }
         Ok(args)
     }
@@ -371,10 +396,34 @@ pub fn saved_routes() -> BTreeMap<String, Selection> {
     for (harness, route) in saved {
         let mut selection = Selection {
             hybrid: route["hybrid"].as_bool().unwrap_or(false),
+            fallback: route["fallback"].as_bool().unwrap_or(false),
             ..Selection::default()
         };
         let default_public = route["model"].as_str().unwrap_or("");
         let targets = route["targets"].as_array().cloned().unwrap_or_default();
+        // Chains name public model ids; map them back once every target is known.
+        let by_public: BTreeMap<&str, Target> = targets
+            .iter()
+            .filter_map(|t| {
+                Some((
+                    t["public_model"].as_str()?,
+                    Target::new(t["provider"].as_str()?, t["model"].as_str()?),
+                ))
+            })
+            .collect();
+        for target in &targets {
+            let to: Vec<Target> = target["fallbacks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|public| by_public.get(public.as_str()?).cloned())
+                .collect();
+            if let (Some(provider), Some(model), false) =
+                (target["provider"].as_str(), target["model"].as_str(), to.is_empty())
+            {
+                selection.chains.insert(Target::new(provider, model), to);
+            }
+        }
         for target in &targets {
             let (Some(provider), Some(model)) =
                 (target["provider"].as_str(), target["model"].as_str())
@@ -614,5 +663,29 @@ mod tests {
         assert!(found[1].installed);
         assert_eq!(found[1].detail, "2.1.153 (Claude Code)");
         assert!(!found[2].installed);
+    }
+
+    #[test]
+    fn re_applying_keeps_fallback_and_chains() {
+        let deepseek = Target::new("evren", "deepseek-v4.1-flash");
+        let glm = Target::new("evren", "glm-5.3");
+        let mut selection = Selection {
+            targets: vec![deepseek.clone(), glm.clone()],
+            default: Some(deepseek.clone()),
+            fallback: true,
+            ..Selection::default()
+        };
+        selection.chains.insert(deepseek.clone(), vec![glm.clone()]);
+        let args = selection.plan_args("claude-code").unwrap();
+        assert!(args.iter().any(|a| a == "--fallback"), "{args:?}");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--fallback-chain", "evren::deepseek-v4.1-flash=evren::glm-5.3"]));
+
+        // Deselecting a model takes it out of every chain; an emptied chain goes.
+        selection.toggle(&glm);
+        assert!(selection.chains.is_empty());
+        let args = selection.plan_args("claude-code").unwrap();
+        assert!(!args.iter().any(|a| a == "--fallback-chain"), "{args:?}");
     }
 }
