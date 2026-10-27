@@ -10,9 +10,12 @@ use ratatui::widgets::ListState;
 
 use crate::data::{
     age, list_backups, load_catalog_cache, save_catalog_cache, saved_profiles, saved_routes,
-    Backend, HarnessInfo, OauthInfo, ProviderInfo, Selection, Target, ANTHROPIC_MODELS, CLAUDE,
-    HARNESSES, OPENAI_FALLBACK,
+    AgentsInfo, Backend, HarnessInfo, OauthInfo, ProviderInfo, Selection, Target,
+    ANTHROPIC_MODELS, CLAUDE, HARNESSES, OPENAI_FALLBACK,
 };
+
+/// Harnesses with file-based workers; Codex picks sub-agent models itself.
+pub const CODEX: usize = 0;
 
 pub enum Catalog {
     Loading,
@@ -37,10 +40,54 @@ pub struct ChainEdit {
     pub cursor: usize,
 }
 
+/// What confirming a plan review does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReviewAction {
+    /// `turnout apply` for the harness route.
+    #[default]
+    Route,
+    /// `turnout agents apply` for a worker file.
+    Agents,
+    /// The manager: a shared-settings route change; only `y` applies it.
+    Manager,
+}
+
 pub struct Review {
     pub harness: usize,
     pub text: String,
     pub scroll: u16,
+    pub action: ReviewAction,
+}
+
+pub enum AgentsLoad {
+    Loading,
+    Ready(AgentsInfo),
+    Failed(String),
+}
+
+pub enum AgentsMode {
+    List,
+    /// New worker, step 1.
+    Name {
+        input: String,
+        error: Option<String>,
+    },
+    /// New worker step 2, or changing a worker's model (`editing`).
+    Model {
+        name: String,
+        user_scope: bool,
+        cursor: usize,
+        editing: bool,
+    },
+    Manager {
+        cursor: usize,
+    },
+}
+
+pub struct AgentsView {
+    pub harness: usize,
+    pub cursor: usize,
+    pub mode: AgentsMode,
 }
 
 pub enum ConnMode {
@@ -203,6 +250,8 @@ pub struct Output {
 
 pub enum ConfirmKind {
     Rollback(String),
+    /// Undo the last `agents apply` for this harness.
+    AgentRollback(usize),
     AgentUninstall,
     KeyMigrateDelete,
 }
@@ -231,6 +280,7 @@ pub enum Modal {
     Confirm(Confirm),
     Picker(Picker),
     Chain(ChainEdit),
+    Agents(AgentsView),
     Review(Review),
     Conn(Conn),
     Message(Message),
@@ -255,6 +305,11 @@ pub enum Msg {
     Provider(Result<String, String>),
     /// `providers limit` finished: (provider, new limit, CLI result).
     Limit(String, Option<u32>, Result<String, String>),
+    Agents(usize, Result<AgentsInfo, String>),
+    /// An agent or manager plan is ready to review.
+    AgentPlan(usize, ReviewAction, Result<String, String>),
+    /// An agent change finished: (harness, toast on success, CLI result).
+    AgentDone(usize, String, Result<String, String>),
     Cli {
         title: String,
         ok: bool,
@@ -283,6 +338,8 @@ pub struct App {
     pub providers: Vec<ProviderInfo>,
     pub oauth: Vec<OauthInfo>,
     pub catalog: BTreeMap<String, Catalog>,
+    /// Worker agents per harness index, loaded in the background.
+    pub agents: BTreeMap<usize, AgentsLoad>,
     pub cursor: usize,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
@@ -320,6 +377,7 @@ impl App {
                 .into_iter()
                 .map(|(provider, models)| (provider, Catalog::Ready(models)))
                 .collect(),
+            agents: BTreeMap::new(),
             cursor: 0,
             modal: None,
             toast: None,
@@ -338,6 +396,19 @@ impl App {
     pub fn start(&mut self) {
         self.spawn(|backend| Msg::Harnesses(backend.harnesses()));
         self.reload_connections();
+        for harness in 0..HARNESSES.len() {
+            if harness != CODEX {
+                self.load_agents(harness);
+            }
+        }
+    }
+
+    fn load_agents(&mut self, harness: usize) {
+        if !matches!(self.agents.get(&harness), Some(AgentsLoad::Ready(_))) {
+            self.agents.insert(harness, AgentsLoad::Loading);
+        }
+        let id = HARNESSES[harness].0;
+        self.spawn(move |backend| Msg::Agents(harness, backend.agents(id)));
     }
 
     fn spawn(&self, work: impl FnOnce(Backend) -> Msg + Send + 'static) {
@@ -430,6 +501,7 @@ impl App {
                         harness,
                         text,
                         scroll: 0,
+                        action: ReviewAction::Route,
                     }));
                 }
             }
@@ -453,6 +525,46 @@ impl App {
                 self.reload_connections();
             }
             Msg::Provider(Err(error)) => self.message("Sağlayıcı işlemi başarısız", error, false),
+            Msg::Agents(harness, Ok(info)) => {
+                self.agents.insert(harness, AgentsLoad::Ready(info));
+            }
+            Msg::Agents(harness, Err(error)) => {
+                self.agents.insert(harness, AgentsLoad::Failed(error));
+            }
+            Msg::AgentPlan(harness, action, Ok(text)) => {
+                let text = if action == ReviewAction::Manager {
+                    let file = if harness == CLAUDE {
+                        "~/.claude/settings.json"
+                    } else {
+                        "OpenCode ayar dosyası"
+                    };
+                    let body: Vec<&str> = text
+                        .lines()
+                        .filter(|line| !line.starts_with("not applied"))
+                        .collect();
+                    format!(
+                        "⚠ Paylaşılan ayar: {file} dosyasını CLI ve VS Code eklentisi birlikte kullanır.\n⚠ Açık oturumlar yeniden başlatılınca değişir.\n\n{}",
+                        body.join("\n")
+                    )
+                } else {
+                    text
+                };
+                self.modal = Some(Modal::Review(Review {
+                    harness,
+                    text,
+                    scroll: 0,
+                    action,
+                }));
+            }
+            Msg::AgentPlan(_, _, Err(error)) => {
+                self.message("Önizleme hazırlanamadı", error, false)
+            }
+            Msg::AgentDone(harness, toast, Ok(_)) => {
+                self.modal = None;
+                self.say(toast, true);
+                self.load_agents(harness);
+            }
+            Msg::AgentDone(_, _, Err(error)) => self.message("Ajan değişikliği yapılamadı", error, false),
             Msg::Limit(provider, limit, Ok(text)) => {
                 self.reload_connections();
                 self.modal = Some(Modal::Conn(Conn {
@@ -575,6 +687,7 @@ impl App {
             Some(Modal::Confirm(confirm)) => self.confirm_key(confirm, key),
             Some(Modal::Picker(picker)) => self.picker_key(picker, key),
             Some(Modal::Chain(edit)) => self.chain_key(edit, key),
+            Some(Modal::Agents(view)) => self.agents_key(view, key),
             Some(Modal::Review(review)) => self.review_key(review, key),
             Some(Modal::Conn(conn)) => self.conn_key(conn, key),
             Some(Modal::Message(_)) | Some(Modal::Help) => {}
@@ -606,6 +719,7 @@ impl App {
                 self.start();
                 self.say("Yenileniyor…", true);
             }
+            KeyCode::Char('w') => self.open_agents(),
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
             KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('x') => self.run_cmd(Cmd::Run),
@@ -907,6 +1021,18 @@ impl App {
                 }
                 self.run_cli("Geri alınıyor", args, true);
             }
+            ConfirmKind::AgentRollback(harness) => {
+                let args = vec!["agents".to_string(), "rollback".into()];
+                self.modal = Some(Modal::Busy("Geri alınıyor…".into()));
+                self.spawn(move |backend| {
+                    let (ok, text) = backend.run_both(&args);
+                    Msg::AgentDone(
+                        harness,
+                        "✓ Son ajan değişikliği geri alındı · yeni oturumda yüklenir".into(),
+                        if ok { Ok(text) } else { Err(text) },
+                    )
+                });
+            }
             ConfirmKind::AgentUninstall => self.cli(
                 "Turnout Agent kaldırılıyor",
                 &["gateway", "uninstall"],
@@ -1009,6 +1135,207 @@ impl App {
             _ => {}
         }
         self.modal = Some(Modal::Picker(picker));
+    }
+
+    /// Models the harness's applied route serves: the only ones a worker or
+    /// the manager can use.
+    pub fn route_models(&self, harness: usize) -> Vec<Target> {
+        self.saved
+            .get(HARNESSES[harness].0)
+            .map(|selection| selection.targets.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn agents_info(&self, harness: usize) -> Option<&AgentsInfo> {
+        match self.agents.get(&harness) {
+            Some(AgentsLoad::Ready(info)) => Some(info),
+            _ => None,
+        }
+    }
+
+    fn open_agents(&mut self) {
+        if self.cursor == CODEX {
+            let models: Vec<String> = self
+                .route_models(CODEX)
+                .iter()
+                .map(|target| target.model.clone())
+                .collect();
+            let list = if models.is_empty() {
+                "Codex için henüz bir Turnout rotası yok.".to_string()
+            } else {
+                format!("Alt ajan olabilecek modeller (Codex rotası):\n  {}", models.join(" · "))
+            };
+            self.message(
+                "Ajanlar — Codex",
+                format!("Codex işçi dosyası kullanmaz: yönetici her alt ajanın modelini kendisi seçer (spawn_agent).\n\n{list}\n\nListeyi değiştirmek için modeller (⏎)."),
+                true,
+            );
+            return;
+        }
+        let harness = self.cursor;
+        self.load_agents(harness);
+        self.modal = Some(Modal::Agents(AgentsView {
+            harness,
+            cursor: 0,
+            mode: AgentsMode::List,
+        }));
+    }
+
+    fn agent_plan(&mut self, harness: usize, args: Vec<String>, action: ReviewAction) {
+        self.modal = Some(Modal::Busy("Önizleme hazırlanıyor…".into()));
+        self.spawn(move |backend| {
+            let (ok, text) = backend.run_both(&args);
+            Msg::AgentPlan(harness, action, if ok { Ok(text) } else { Err(text) })
+        });
+    }
+
+    fn agents_key(&mut self, mut view: AgentsView, key: KeyEvent) {
+        let harness = view.harness;
+        let id = HARNESSES[harness].0;
+        let models = self.route_models(harness);
+        let workers = self
+            .agents_info(harness)
+            .map(|info| info.agents.clone())
+            .unwrap_or_default();
+        let selected = workers.get(view.cursor).cloned();
+        let not_turnouts = |worker: &crate::data::AgentInfo| {
+            format!(
+                "⚠ {} elle yazılmış: {}\n\nTurnout kendi yazmadığı bir dosyayı değiştirmez. Düzenlemek için dosyayı elle açın; Turnout'un yönetmesini istiyorsanız başka bir adla n ile yeni işçi oluşturun.",
+                worker.name, worker.path
+            )
+        };
+        match &mut view.mode {
+            AgentsMode::List => match key.code {
+                KeyCode::Esc => return,
+                KeyCode::Up | KeyCode::Char('k') => view.cursor = view.cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    view.cursor = (view.cursor + 1).min(workers.len().saturating_sub(1))
+                }
+                KeyCode::Char('r') => self.load_agents(harness),
+                KeyCode::Char('n') if !models.is_empty() => {
+                    view.mode = AgentsMode::Name {
+                        input: String::new(),
+                        error: None,
+                    }
+                }
+                KeyCode::Char('m') if !models.is_empty() => {
+                    view.mode = AgentsMode::Manager { cursor: 0 }
+                }
+                KeyCode::Char('e') => match selected {
+                    Some(worker) if worker.managed => {
+                        view.mode = AgentsMode::Model {
+                            name: worker.name.clone(),
+                            user_scope: worker.scope == "user",
+                            cursor: 0,
+                            editing: true,
+                        }
+                    }
+                    Some(worker) => {
+                        self.message("Değiştirilemez", not_turnouts(&worker), false);
+                        return;
+                    }
+                    None => {}
+                },
+                KeyCode::Char('d') => match selected {
+                    Some(worker) if worker.managed => {
+                        let args = vec![
+                            "agents".into(), "plan".into(), worker.name.clone(),
+                            "--harness".into(), id.into(), "--remove".into(),
+                            "--scope".into(), worker.scope.clone(),
+                        ];
+                        self.agent_plan(harness, args, ReviewAction::Agents);
+                        return;
+                    }
+                    Some(worker) => {
+                        self.message("Değiştirilemez", not_turnouts(&worker), false);
+                        return;
+                    }
+                    None => {}
+                },
+                KeyCode::Char('u') => {
+                    self.modal = Some(Modal::Confirm(Confirm {
+                        kind: ConfirmKind::AgentRollback(harness),
+                        text: "Son ajan değişikliği geri alınsın mı?".into(),
+                    }));
+                    return;
+                }
+                _ => {}
+            },
+            AgentsMode::Name { input, error } => match key.code {
+                KeyCode::Esc => view.mode = AgentsMode::List,
+                KeyCode::Backspace => {
+                    input.pop();
+                    *error = None;
+                }
+                KeyCode::Char(c) if input.chars().count() < 64 && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.push(c);
+                    *error = None;
+                }
+                KeyCode::Enter => {
+                    let name = input.trim().to_string();
+                    let valid = !name.is_empty()
+                        && !name.starts_with('-')
+                        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                    if valid {
+                        view.mode = AgentsMode::Model {
+                            name,
+                            user_scope: false,
+                            cursor: 0,
+                            editing: false,
+                        };
+                    } else {
+                        *error = Some("Ad yalnızca küçük harf, rakam ve tire içerebilir. Örnek: deepseek-worker".into());
+                    }
+                }
+                _ => {}
+            },
+            AgentsMode::Model { name, user_scope, cursor, editing } => match key.code {
+                KeyCode::Esc => {
+                    view.mode = if *editing {
+                        AgentsMode::List
+                    } else {
+                        AgentsMode::Name { input: name.clone(), error: None }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *cursor = (*cursor + 1).min(models.len().saturating_sub(1))
+                }
+                KeyCode::Tab if !*editing => *user_scope = !*user_scope,
+                KeyCode::Enter => {
+                    if let Some(model) = models.get(*cursor) {
+                        let args = vec![
+                            "agents".into(), "plan".into(), name.clone(),
+                            "--harness".into(), id.into(),
+                            "--model".into(), format!("{}::{}", model.provider, model.model),
+                            "--scope".into(), if *user_scope { "user".into() } else { "project".into() },
+                        ];
+                        self.agent_plan(harness, args, ReviewAction::Agents);
+                        return;
+                    }
+                }
+                _ => {}
+            },
+            AgentsMode::Manager { cursor } => match key.code {
+                KeyCode::Esc => view.mode = AgentsMode::List,
+                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *cursor = (*cursor + 1).min(models.len().saturating_sub(1))
+                }
+                KeyCode::Enter => {
+                    if let Some(model) = models.get(*cursor) {
+                        let args = vec![
+                            "agents".into(), "manager".into(), "--harness".into(), id.into(),
+                            format!("{}::{}", model.provider, model.model),
+                        ];
+                        self.agent_plan(harness, args, ReviewAction::Manager);
+                        return;
+                    }
+                }
+                _ => {}
+            },
+        }
+        self.modal = Some(Modal::Agents(view));
     }
 
     /// The models `edit.from` may fall back to: the other selected models.
@@ -1115,12 +1442,27 @@ impl App {
     fn review_key(&mut self, mut review: Review, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('n') => return,
+            // A shared-settings change (the manager) is never applied by Enter.
+            KeyCode::Enter if review.action == ReviewAction::Manager => {}
             KeyCode::Char('y') | KeyCode::Enter => {
-                let id = HARNESSES[review.harness].0.to_string();
+                let harness = review.harness;
+                let id = HARNESSES[harness].0.to_string();
                 self.modal = Some(Modal::Busy("Uygulanıyor…".into()));
-                self.spawn(move |backend| {
-                    Msg::Applied(backend.run(&["apply".into(), "--harness".into(), id], None))
-                });
+                if review.action == ReviewAction::Agents {
+                    self.spawn(move |backend| {
+                        let (ok, text) =
+                            backend.run_both(&["agents".into(), "apply".into(), "--harness".into(), id]);
+                        Msg::AgentDone(
+                            harness,
+                            "✓ İşçi değişikliği uygulandı · geri al: w → u · yeni oturumda yüklenir".into(),
+                            if ok { Ok(text) } else { Err(text) },
+                        )
+                    });
+                } else {
+                    self.spawn(move |backend| {
+                        Msg::Applied(backend.run(&["apply".into(), "--harness".into(), id], None))
+                    });
+                }
                 return;
             }
             KeyCode::Up | KeyCode::Char('k') => review.scroll = review.scroll.saturating_sub(1),

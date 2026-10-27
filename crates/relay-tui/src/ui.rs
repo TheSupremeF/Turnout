@@ -10,8 +10,8 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{
-    App, Catalog, Confirm, Conn, ConnMode, Input, Menu, Message, Modal, Output, Palette, Picker,
-    Readiness, Review, DIALECTS,
+    AgentsLoad, AgentsMode, AgentsView, App, Catalog, Confirm, Conn, ConnMode, Input, Menu,
+    Message, Modal, Output, Palette, Picker, Readiness, Review, ReviewAction, CODEX, DIALECTS,
 };
 use crate::data::{is_chat_model, provider_name, Target, CLAUDE, HARNESSES};
 use crate::theme::{self, bold, dim, text, ACCENT, AMBER, DIM, FAINT, MINT, PANEL, RED, WORDMARK};
@@ -38,6 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Modal::Confirm(confirm) => confirm_dialog(frame, confirm, area),
             Modal::Picker(picker) => picker_dialog(frame, app, picker, area),
             Modal::Chain(edit) => chain_dialog(frame, app, edit, area),
+            Modal::Agents(view) => agents_dialog(frame, app, view, area),
             Modal::Review(review) => review_dialog(frame, review, area),
             Modal::Conn(conn) => conn_dialog(frame, app, conn, area),
             Modal::Message(message) => message_dialog(frame, message, area),
@@ -60,10 +61,15 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn keys(pairs: &[(&str, &str)]) -> Line<'static> {
+    keys_spaced(pairs, "   ")
+}
+
+/// Key hints with a chosen gap; narrow screens use two spaces to keep every key.
+fn keys_spaced(pairs: &[(&str, &str)], gap: &'static str) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (key, label)) in pairs.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw(gap));
         }
         spans.push(Span::styled(key.to_string(), bold(ACCENT)));
         spans.push(Span::styled(format!(" {label}"), dim()));
@@ -97,7 +103,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(logo_height),
-            Constraint::Length(1 + 4 * HARNESSES.len() as u16),
+            Constraint::Length(1 + 5 * HARNESSES.len() as u16),
             Constraint::Min(0),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -129,26 +135,42 @@ fn home(frame: &mut Frame, app: &App, area: Rect) {
     );
     for (index, (id, name, _)) in HARNESSES.iter().enumerate() {
         let card = Rect {
-            y: column.y + 1 + 4 * index as u16,
-            height: 4,
+            y: column.y + 1 + 5 * index as u16,
+            height: 5,
             ..column
         };
         harness_card(frame, app, index, id, name, card);
     }
 
     toast_line(frame, app, rows[3]);
-    frame.render_widget(
-        Paragraph::new(keys(&[
+    // Every key fits from 100 columns; narrower, `c` stays in ? and :.
+    let hints: &[(&str, &str)] = if area.width >= 100 {
+        &[
             ("↑↓", "seç"),
             ("⏎", "modeller"),
             ("a", "uygula"),
             ("x", "çalıştır"),
+            ("w", "ajanlar"),
             ("c", "bağlantılar"),
-            (":", "tüm komutlar"),
+            (":", "komutlar"),
             ("?", "yardım"),
             ("q", "çık"),
-        ]))
-        .alignment(Alignment::Center),
+        ]
+    } else {
+        &[
+            ("↑↓", "seç"),
+            ("⏎", "model"),
+            ("a", "uygula"),
+            ("x", "çalıştır"),
+            ("w", "ajanlar"),
+            (":", "komut"),
+            ("?", "yardım"),
+            ("q", "çık"),
+        ]
+    };
+    let gap = if area.width >= 100 { "   " } else { "  " };
+    frame.render_widget(
+        Paragraph::new(keys_spaced(hints, gap)).alignment(Alignment::Center),
         rows[4],
     );
 }
@@ -210,6 +232,42 @@ fn harness_card(frame: &mut Frame, app: &App, index: usize, id: &str, name: &str
         }
     };
 
+    // Who manages, how many workers, and whether a failing model may switch:
+    // words, never colour alone.
+    let third = if draft.targets.is_empty() {
+        Line::from("")
+    } else {
+        let manager = draft
+            .default_target()
+            .map(|target| target.model.clone())
+            .unwrap_or_default();
+        let workers = if index == CODEX {
+            "işçi dosyası yok".to_string()
+        } else {
+            match app.agents.get(&index) {
+                Some(AgentsLoad::Ready(info)) => format!("{} işçi", info.agents.len()),
+                Some(AgentsLoad::Failed(_)) => "işçiler okunamadı".to_string(),
+                _ => "işçiler…".to_string(),
+            }
+        };
+        let fallback = if let Some((from, to)) = draft.chains.iter().next() {
+            let more = if draft.chains.len() > 1 { format!(" +{}", draft.chains.len() - 1) } else { String::new() };
+            format!("{} → {}{more}", from.model, to.first().map(|t| t.model.as_str()).unwrap_or(""))
+        } else if draft.fallback {
+            "açık".to_string()
+        } else {
+            "kapalı".to_string()
+        };
+        Line::from(vec![
+            Span::styled("  yönetici ", dim()),
+            Span::styled(manager, text()),
+            Span::styled(" · ", dim()),
+            Span::styled(workers, text()),
+            Span::styled(" · fallback ", dim()),
+            Span::styled(fallback, text()),
+        ])
+    };
+
     let border = if selected { ACCENT } else { FAINT };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -220,7 +278,7 @@ fn harness_card(frame: &mut Frame, app: &App, index: usize, id: &str, name: &str
         })
         .border_style(Style::default().fg(border))
         .padding(Padding::horizontal(1));
-    frame.render_widget(Paragraph::new(vec![first, second]).block(block), area);
+    frame.render_widget(Paragraph::new(vec![first, second, third]).block(block), area);
 }
 
 fn toast_line(frame: &mut Frame, app: &App, area: Rect) {
@@ -430,6 +488,212 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
     frame.render_widget(Paragraph::new(footer), rows[5]);
 }
 
+// ---- agents -----------------------------------------------------------------------
+
+fn agents_dialog(frame: &mut Frame, app: &App, view: &AgentsView, area: Rect) {
+    let harness = view.harness;
+    let name = HARNESSES[harness].1;
+    let models = app.route_models(harness);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut title = format!("Ajanlar — {name}");
+    let footer: Line<'static>;
+
+    let model_list = |lines: &mut Vec<Line<'static>>, cursor: usize, current: Option<&str>| {
+        for (index, target) in models.iter().enumerate() {
+            let marker = if index == cursor { "▌ " } else { "  " };
+            let now = current == Some(target.model.as_str());
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(ACCENT)),
+                Span::styled(if now { "● " } else { "○ " }, Style::default().fg(if now { MINT } else { FAINT })),
+                Span::styled(format!("{:<25}", target.model), if index == cursor { bold(theme::TEXT) } else { text() }),
+                Span::styled(provider_name(&target.provider), dim()),
+                Span::styled(if now { "   şu an" } else { "" }, dim()),
+            ]));
+        }
+    };
+
+    match &view.mode {
+        AgentsMode::Name { input, error } => {
+            title = "Yeni işçi 1/2 — ad".into();
+            lines.push(Line::from(Span::styled(
+                "Yöneticinin bu işçiyi çağıracağı ad (küçük harf, rakam, tire):",
+                text(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("› ", Style::default().fg(ACCENT)),
+                Span::styled(input.clone(), text()),
+                Span::styled("▏", Style::default().fg(ACCENT)),
+            ]));
+            if let Some(message) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(format!("✗ {message}"), Style::default().fg(RED))));
+            }
+            footer = keys(&[("⏎", "devam"), ("Esc", "vazgeç")]);
+        }
+        AgentsMode::Model { name: worker, user_scope, cursor, editing } => {
+            title = if *editing {
+                format!("{worker} — model")
+            } else {
+                "Yeni işçi 2/2 — model".into()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("Yalnızca {name} rotasının sunduğu modeller:"),
+                text(),
+            )));
+            lines.push(Line::from(""));
+            model_list(&mut lines, *cursor, None);
+            lines.push(Line::from(""));
+            if !*editing {
+                lines.push(Line::from(vec![
+                    Span::styled("Kapsam  ", dim()),
+                    Span::styled(if *user_scope { "proje  " } else { "[proje]  " }, if *user_scope { dim() } else { bold(ACCENT) }),
+                    Span::styled(if *user_scope { "[kullanıcı]" } else { "kullanıcı" }, if *user_scope { bold(ACCENT) } else { dim() }),
+                    Span::styled(
+                        if *user_scope { "   kullanıcı: bütün projeler" } else { "   proje: yalnızca bu projede" },
+                        dim(),
+                    ),
+                ]));
+            }
+            if harness == CLAUDE {
+                lines.push(Line::from(Span::styled("Kendi git worktree'sinde çalışır · en fazla 40 tur", dim())));
+            } else {
+                lines.push(Line::from(Span::styled("Worktree yok: paralel işçilere ayrı dosyalar verin · en fazla 40 adım", dim())));
+            }
+            footer = if *editing {
+                keys(&[("⏎", "önizle"), ("Esc", "geri")])
+            } else {
+                keys(&[("⏎", "önizle"), ("Tab", "kapsam"), ("Esc", "geri")])
+            };
+        }
+        AgentsMode::Manager { cursor } => {
+            title = format!("Yönetici — {name}");
+            lines.push(Line::from(Span::styled("Ana oturumun modeli. İşçiler işi bu modelden alır.", text())));
+            lines.push(Line::from(""));
+            let current = app.saved.get(HARNESSES[harness].0).and_then(|s| s.default_target().map(|t| t.model.clone()));
+            model_list(&mut lines, *cursor, current.as_deref());
+            footer = keys(&[("⏎", "önizle"), ("Esc", "vazgeç")]);
+        }
+        AgentsMode::List => {
+            let manager = app.saved.get(HARNESSES[harness].0).and_then(|s| s.default_target().map(|t| t.model.clone()));
+            match (&manager, app.agents.get(&harness)) {
+                (None, _) => {
+                    lines.push(Line::from(Span::styled(format!("{name} için henüz bir Turnout rotası yok."), text())));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("Önce ", dim()),
+                        Span::styled("⏎", bold(ACCENT)),
+                        Span::styled(" ile model seçip ", dim()),
+                        Span::styled("a", bold(ACCENT)),
+                        Span::styled(" ile uygulayın; işçiler yalnızca rotadaki modelleri kullanabilir.", dim()),
+                    ]));
+                    footer = keys(&[("Esc", "kapat")]);
+                }
+                (Some(_), None) | (Some(_), Some(AgentsLoad::Loading)) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", SPINNER[(app.tick as usize / 2) % SPINNER.len()]), Style::default().fg(ACCENT)),
+                        Span::styled("ajanlar okunuyor…", dim()),
+                    ]));
+                    footer = keys(&[("Esc", "kapat")]);
+                }
+                (Some(_), Some(AgentsLoad::Failed(error))) => {
+                    lines.push(Line::from(Span::styled("✗ Ajanlar okunamadı", Style::default().fg(RED))));
+                    lines.push(Line::from(Span::styled(format!("  {}", error.lines().last().unwrap_or("")), dim())));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("Klasör izinlerini kontrol edip ", dim()),
+                        Span::styled("r", bold(ACCENT)),
+                        Span::styled(" ile tekrar deneyin.", dim()),
+                    ]));
+                    footer = keys(&[("r", "tekrar dene"), ("Esc", "kapat")]);
+                }
+                (Some(manager), Some(AgentsLoad::Ready(info))) => {
+                    lines.push(Line::from(Span::styled("YÖNETİCİ", bold(DIM))));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {manager}"), text()),
+                        Span::styled("   rotanın varsayılanı · ", dim()),
+                        Span::styled("m", bold(ACCENT)),
+                        Span::styled(" değiştir", dim()),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled("İŞÇİLER", bold(DIM))));
+                    if info.agents.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  Henüz işçi yok. ", dim()),
+                            Span::styled("n", bold(ACCENT)),
+                            Span::styled(" ile ekleyin: yönetici işleri bu modellere dağıtabilir.", dim()),
+                        ]));
+                    }
+                    for (index, worker) in info.agents.iter().enumerate() {
+                        let selected = index == view.cursor;
+                        let scope = if worker.scope == "user" { "kullanıcı" } else { "proje" };
+                        let mut spans = vec![
+                            Span::styled(if selected { "▌ " } else { "  " }, Style::default().fg(ACCENT)),
+                            Span::styled(
+                                format!(
+                                    "{:<17}{:<21}{:<11}",
+                                    worker.name,
+                                    worker.model.as_deref().unwrap_or("(yöneticiden)"),
+                                    scope
+                                ),
+                                if selected { bold(theme::TEXT) } else { text() },
+                            ),
+                            Span::styled(
+                                if worker.managed { "Turnout" } else { "elle yazılmış" },
+                                if worker.managed { text() } else { dim() },
+                            ),
+                        ];
+                        if !worker.routable {
+                            spans.push(Span::styled("  ✗ rotada yok", Style::default().fg(RED)));
+                        }
+                        lines.push(Line::from(spans));
+                    }
+                    if let Some(worker) = info.agents.get(view.cursor) {
+                        lines.push(Line::from(""));
+                        if !worker.routable {
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "✗ {} bu {name} rotasında yok; işçi ilk isteğinde hata alır.",
+                                    worker.model.as_deref().unwrap_or("?")
+                                ),
+                                Style::default().fg(RED),
+                            )));
+                            lines.push(Line::from(vec![
+                                Span::styled("  Düzeltmek için: ", dim()),
+                                Span::styled("e", bold(ACCENT)),
+                                Span::styled(" ile rotadaki bir model seçin, ya da modeller (", dim()),
+                                Span::styled("⏎", bold(ACCENT)),
+                                Span::styled(") içinden ekleyip ", dim()),
+                                Span::styled("a", bold(ACCENT)),
+                                Span::styled(" ile uygulayın.", dim()),
+                            ]));
+                        } else {
+                            lines.push(Line::from(Span::styled(format!("{} · {}", worker.name, worker.path), dim())));
+                        }
+                    }
+                    footer = keys(&[
+                        ("n", "yeni"),
+                        ("e", "model"),
+                        ("d", "kaldır"),
+                        ("u", "geri al"),
+                        ("m", "yönetici"),
+                        ("Esc", "kapat"),
+                    ]);
+                }
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(footer);
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2).max(8));
+    let rect = centered(area, 84, height);
+    frame.render_widget(Clear, rect);
+    let block = dialog(&title, ACCENT);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 // ---- fallback chain -------------------------------------------------------------
 
 fn chain_dialog(frame: &mut Frame, app: &App, edit: &crate::app::ChainEdit, area: Rect) {
@@ -536,12 +800,13 @@ fn review_dialog(frame: &mut Frame, review: &mut Review, area: Rect) {
             .scroll((review.scroll, 0)),
         parts[0],
     );
+    let confirm = if review.action == ReviewAction::Manager {
+        ("y", "uygula (⏎ bu pencerede uygulamaz)")
+    } else {
+        ("y ⏎", "uygula")
+    };
     frame.render_widget(
-        Paragraph::new(keys(&[
-            ("y ⏎", "uygula"),
-            ("n Esc", "vazgeç"),
-            ("↑↓ PgUp PgDn", "kaydır"),
-        ])),
+        Paragraph::new(keys(&[confirm, ("n Esc", "vazgeç"), ("↑↓ PgUp PgDn", "kaydır")])),
         parts[1],
     );
 }
@@ -1000,6 +1265,7 @@ fn help_dialog(frame: &mut Frame, area: Rect) {
             "seçimi başlatma profili olarak kaydet (config'e dokunmaz)",
         ),
         ("b", "yedekten geri al"),
+        ("w", "ajanlar: yönetici ve işçi modelleri"),
         ("g", "Turnout Agent durumu"),
         ("d", "sağlık kontrolü (doctor)"),
         (

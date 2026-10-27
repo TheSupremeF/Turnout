@@ -79,8 +79,8 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::app::{
-        App, Catalog, Cmd, Confirm, ConfirmKind, ConnMode, Menu, MenuItem, MenuKind, Modal, Msg,
-        COMMANDS,
+        AgentsLoad, App, Catalog, Cmd, Confirm, ConfirmKind, ConnMode, Menu, MenuItem, MenuKind,
+        Modal, Msg, ReviewAction, COMMANDS,
     };
     use crate::data::{Backend, HarnessInfo, OauthInfo, ProviderInfo, Selection, Target, CLAUDE};
     use crate::ui;
@@ -580,5 +580,120 @@ mod tests {
         assert!(matches!(a.modal, Some(Modal::Conn(_))));
         press(&mut a, KeyCode::Esc);
         assert!(screen(&mut a, 100, 30).contains("l sınır"));
+    }
+
+    fn with_claude_route(a: &mut App) {
+        let opus = Target::new("anthropic", "claude-opus-5-5");
+        let deepseek = Target::new("evren", "deepseek-v4.1-flash");
+        let selection = Selection {
+            targets: vec![opus.clone(), deepseek],
+            default: Some(opus),
+            hybrid: true,
+            ..Selection::default()
+        };
+        a.saved.insert("claude-code".into(), selection.clone());
+        a.drafts[1] = selection;
+        a.agents.insert(
+            1,
+            AgentsLoad::Ready(crate::data::parse_agents(
+                r#"{"manager":"claude-opus-5-5","agents":[
+                  {"name":"deepseek-worker","model":"deepseek-v4.1-flash","scope":"project","managed":true,"routable":true,"path":".claude/agents/deepseek-worker.md"},
+                  {"name":"my-helper","model":"sonnet","scope":"project","managed":false,"routable":true,"path":".claude/agents/my-helper.md"},
+                  {"name":"gpt-worker","model":"gpt-6.1-sol","scope":"project","managed":true,"routable":false,"path":".claude/agents/gpt-worker.md"}]}"#,
+            ).unwrap()),
+        );
+    }
+
+    #[test]
+    fn the_route_card_says_who_manages_how_many_workers_and_the_fallback() {
+        let mut a = app();
+        with_claude_route(&mut a);
+        let home = screen(&mut a, 100, 30);
+        assert!(home.contains("yönetici claude-opus-5-5 · 3 işçi · fallback kapalı"), "{home}");
+        assert!(home.contains("w ajanlar"), "{home}");
+        // Narrow terminals keep the essential keys.
+        let narrow = screen(&mut a, 80, 24);
+        assert!(narrow.contains("w ajanlar") && narrow.contains("q çık"), "{narrow}");
+    }
+
+    #[test]
+    fn the_agents_window_lists_workers_flags_unserved_models_and_guards_hand_written_files() {
+        let mut a = app();
+        with_claude_route(&mut a);
+        a.cursor = 1;
+        press(&mut a, KeyCode::Char('w'));
+        // Opening refreshes in the background; the test keeps its fixed data.
+        with_claude_route(&mut a);
+        let list = screen(&mut a, 100, 30);
+        assert!(list.contains("YÖNETİCİ") && list.contains("claude-opus-5-5"), "{list}");
+        assert!(list.contains("elle yazılmış"), "{list}");
+        assert!(list.contains("✗ rotada yok"), "{list}");
+
+        // The unserved worker explains how to fix it (WCAG 3.3.3).
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down);
+        let error = screen(&mut a, 100, 30);
+        assert!(error.contains("gpt-6.1-sol bu Claude Code rotasında yok"), "{error}");
+
+        // A hand-written file is never changed.
+        press(&mut a, KeyCode::Up);
+        press(&mut a, KeyCode::Char('d'));
+        let guard = screen(&mut a, 100, 30);
+        assert!(guard.contains("my-helper elle yazılmış"), "{guard}");
+    }
+
+    #[test]
+    fn a_new_worker_needs_a_valid_name_and_a_routed_model() {
+        let mut a = app();
+        with_claude_route(&mut a);
+        a.cursor = 1;
+        press(&mut a, KeyCode::Char('w'));
+        with_claude_route(&mut a);
+        press(&mut a, KeyCode::Char('n'));
+        type_text(&mut a, "DeepSeek Worker");
+        press(&mut a, KeyCode::Enter);
+        let error = screen(&mut a, 100, 30);
+        assert!(error.contains("Ad yalnızca küçük harf, rakam ve tire"), "{error}");
+        for _ in 0.."DeepSeek Worker".len() {
+            press(&mut a, KeyCode::Backspace);
+        }
+        type_text(&mut a, "deepseek-2");
+        press(&mut a, KeyCode::Enter);
+        let models = screen(&mut a, 100, 30);
+        assert!(models.contains("Yeni işçi 2/2"), "{models}");
+        assert!(models.contains("deepseek-v4.1-flash") && models.contains("claude-opus-5-5"), "{models}");
+        assert!(models.contains("[proje]"), "{models}");
+        press(&mut a, KeyCode::Tab);
+        assert!(screen(&mut a, 100, 30).contains("[kullanıcı]"));
+    }
+
+    #[test]
+    fn a_manager_change_is_applied_only_with_y_and_warns_about_shared_settings() {
+        let mut a = app();
+        with_claude_route(&mut a);
+        a.apply_message(Msg::AgentPlan(
+            1,
+            ReviewAction::Manager,
+            Ok("manager: claude-opus-5-5 -> deepseek-v4.1-flash\n-  \"model\": \"claude-opus-5-5\"\n+  \"model\": \"deepseek-v4.1-flash\"\nnot applied: confirm with `turnout apply --harness claude-code`".into()),
+        ));
+        let review = screen(&mut a, 100, 30);
+        assert!(review.contains("Paylaşılan ayar"), "{review}");
+        assert!(review.contains("⏎ bu pencerede uygulamaz"), "{review}");
+        assert!(!review.contains("not applied"), "{review}");
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.modal, Some(Modal::Review(_))), "Enter must not apply");
+    }
+
+    #[test]
+    fn codex_and_routeless_harnesses_explain_instead_of_offering_actions() {
+        let mut a = app();
+        a.cursor = 0;
+        press(&mut a, KeyCode::Char('w'));
+        assert!(screen(&mut a, 100, 30).contains("Codex işçi dosyası kullanmaz"));
+        let mut a = app();
+        a.cursor = 2;
+        press(&mut a, KeyCode::Char('w'));
+        let empty = screen(&mut a, 100, 30);
+        assert!(empty.contains("OpenCode için henüz bir Turnout rotası yok"), "{empty}");
     }
 }

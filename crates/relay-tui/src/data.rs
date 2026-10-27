@@ -190,6 +190,47 @@ pub struct ProviderInfo {
     pub max_concurrent: Option<u32>,
 }
 
+/// One worker agent file, as `turnout agents list --json` reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentInfo {
+    pub name: String,
+    pub model: Option<String>,
+    /// "project" or "user".
+    pub scope: String,
+    /// Written by Turnout (only those can be changed from here).
+    pub managed: bool,
+    /// The route serves its model.
+    pub routable: bool,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentsInfo {
+    /// The route's default model, which manages the workers.
+    pub manager: Option<String>,
+    pub agents: Vec<AgentInfo>,
+}
+
+pub fn parse_agents(text: &str) -> Result<AgentsInfo, String> {
+    let value: Value = serde_json::from_str(text.trim()).map_err(|error| error.to_string())?;
+    Ok(AgentsInfo {
+        manager: value["manager"].as_str().map(str::to_string),
+        agents: value["agents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| AgentInfo {
+                name: item["name"].as_str().unwrap_or_default().to_string(),
+                model: item["model"].as_str().map(str::to_string),
+                scope: item["scope"].as_str().unwrap_or("project").to_string(),
+                managed: item["managed"].as_bool().unwrap_or(false),
+                routable: item["routable"].as_bool().unwrap_or(true),
+                path: item["path"].as_str().unwrap_or_default().to_string(),
+            })
+            .collect(),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct OauthInfo {
     pub id: String,
@@ -307,6 +348,10 @@ impl Backend {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    pub fn agents(&self, harness: &str) -> Result<AgentsInfo, String> {
+        parse_agents(&self.args(&["agents", "list", "--harness", harness, "--json"])?)
     }
 
     pub fn oauth(&self) -> Result<Vec<OauthInfo>, String> {
