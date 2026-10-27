@@ -736,6 +736,145 @@ fn responses_part(p: &Value) -> Option<ContentBlock> {
     }
 }
 
+/// Tools Codex declares inside namespaces (`collaboration.spawn_agent`).
+///
+/// Newer Codex builds send them in an `additional_tools` input item as
+/// `{"type": "namespace", "name": "collaboration", "tools": [...]}` and expect
+/// a call back as `{"type": "function_call", "namespace": "collaboration",
+/// "name": "spawn_agent", ...}`. Providers only know flat function names, so
+/// each one is offered as `<namespace>__<name>` and translated back on the way
+/// out. The table is built from the request itself: splitting on `__` would
+/// misread ordinary names such as `mcp__server__tool`.
+#[derive(Clone, Debug, Default)]
+pub struct ToolNamespaces {
+    /// Flat name -> (namespace, name).
+    flat: HashMap<String, (String, String)>,
+}
+
+impl ToolNamespaces {
+    pub fn flat_name(namespace: &str, name: &str) -> String {
+        format!("{namespace}__{name}")
+    }
+
+    /// Every namespaced function in a Responses request body.
+    pub fn from_responses_request(v: &Value) -> Self {
+        let mut flat = HashMap::new();
+        for (namespace, tool) in namespaced_tools(v) {
+            if let Some(name) = tool["name"].as_str() {
+                flat.insert(
+                    Self::flat_name(namespace, name),
+                    (namespace.to_string(), name.to_string()),
+                );
+            }
+        }
+        Self { flat }
+    }
+
+    /// `(namespace, name)` for a flat name this request declared.
+    pub fn split(&self, flat: &str) -> Option<(&str, &str)> {
+        self.flat
+            .get(flat)
+            .map(|(namespace, name)| (namespace.as_str(), name.as_str()))
+    }
+
+    /// A Responses `function_call` item for `name`, namespaced when it was.
+    fn call_item(&self, name: &str, mut item: Value) -> Value {
+        match self.split(name) {
+            Some((namespace, original)) => {
+                item["namespace"] = json!(namespace);
+                item["name"] = json!(original);
+            }
+            None => item["name"] = json!(name),
+        }
+        item
+    }
+}
+
+/// `(namespace, function tool)` pairs from `additional_tools` input items.
+fn namespaced_tools(v: &Value) -> Vec<(&str, &Value)> {
+    let mut found = Vec::new();
+    for item in v["input"].as_array().into_iter().flatten() {
+        if item["type"] != "additional_tools" {
+            continue;
+        }
+        for group in item["tools"].as_array().into_iter().flatten() {
+            if group["type"] != "namespace" {
+                continue;
+            }
+            let Some(namespace) = group["name"].as_str() else {
+                continue;
+            };
+            for tool in group["tools"].as_array().into_iter().flatten() {
+                if tool["type"] == "function" {
+                    found.push((namespace, tool));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The readable text of a Codex `agent_message` item.
+///
+/// The payload sits in an `encrypted_content` part. It is plain text when the
+/// gateway removed the `encrypted` hint (see [`strip_encrypted`]); real OpenAI
+/// ciphertext (`gAAAA…`) is unreadable to any other provider, so it is
+/// replaced by a note rather than passed on as noise.
+fn agent_message_text(item: &Value) -> String {
+    let mut parts = Vec::new();
+    for part in item["content"].as_array().into_iter().flatten() {
+        match part["type"].as_str() {
+            Some("input_text") | Some("output_text") | Some("text") => {
+                if let Some(text) = part["text"].as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+            Some("encrypted_content") => match part["encrypted_content"].as_str() {
+                Some(text) if text.starts_with("gAAAA") => parts.push(
+                    "[encrypted by OpenAI; not readable by this model]".to_string(),
+                ),
+                Some(text) => parts.push(text.to_string()),
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    parts.join("\n")
+}
+
+/// A Responses function tool (`{"type": "function", "name", ...}`) as a
+/// neutral tool definition under `name`.
+fn responses_tool(name: String, t: &Value) -> ToolDef {
+    let mut input_schema = if t["parameters"].is_object() {
+        t["parameters"].clone()
+    } else {
+        json!({"type": "object"})
+    };
+    strip_encrypted(&mut input_schema);
+    ToolDef {
+        name,
+        description: t["description"].as_str().map(str::to_string),
+        input_schema,
+    }
+}
+
+/// Drop OpenAI's `"encrypted": true` parameter hint everywhere in a schema.
+///
+/// With it, OpenAI returns that argument encrypted (`gAAAA…`) and only an
+/// OpenAI model can read it back. Codex marks `spawn_agent`'s `message` this
+/// way, so a GPT manager would hand a DeepSeek worker a task it cannot read:
+/// the worker starts with no instructions. Plain text crosses providers.
+fn strip_encrypted(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            map.remove("encrypted");
+            map.values_mut().for_each(strip_encrypted);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_encrypted),
+        _ => {}
+    }
+}
+
 pub fn responses_to_chat(
     v: &Value,
     upstream: ProtocolDialect,
@@ -790,9 +929,16 @@ pub fn responses_to_chat(
                 }
             }
             "function_call" => {
+                let name = item["name"].as_str().unwrap_or_default();
+                // An earlier namespaced call is replayed under the flat name
+                // its tool is offered as now.
+                let name = match item["namespace"].as_str() {
+                    Some(namespace) => ToolNamespaces::flat_name(namespace, name),
+                    None => name.to_string(),
+                };
                 let block = ContentBlock::ToolUse {
                     id: item["call_id"].as_str().unwrap_or_default().to_string(),
-                    name: item["name"].as_str().unwrap_or_default().to_string(),
+                    name,
                     input: item["arguments"]
                         .as_str()
                         .and_then(|a| serde_json::from_str(a).ok())
@@ -826,29 +972,39 @@ pub fn responses_to_chat(
                     }]),
                 });
             }
+            // Codex's mail between agents: the task a sub-agent is spawned
+            // with, or a worker's final answer to its manager. To the model
+            // reading it, it is input like a user message.
+            "agent_message" => {
+                let text = agent_message_text(item);
+                if !text.is_empty() {
+                    messages.push(ChatMessage {
+                        role: Role::User,
+                        content: MessageContent::Blocks(vec![ContentBlock::Text { text }]),
+                    });
+                }
+            }
             // Encrypted reasoning, local shell items, … cannot cross providers.
             _ => {}
         }
     }
 
-    let tools: Vec<ToolDef> = v["tools"]
+    let mut tools: Vec<ToolDef> = v["tools"]
         .as_array()
         .map(|tools| {
             tools
                 .iter()
                 .filter(|t| t["type"] == "function")
-                .map(|t| ToolDef {
-                    name: t["name"].as_str().unwrap_or_default().to_string(),
-                    description: t["description"].as_str().map(str::to_string),
-                    input_schema: if t["parameters"].is_object() {
-                        t["parameters"].clone()
-                    } else {
-                        json!({"type": "object"})
-                    },
-                })
+                .map(|t| responses_tool(t["name"].as_str().unwrap_or_default().to_string(), t))
                 .collect()
         })
         .unwrap_or_default();
+    for (namespace, tool) in namespaced_tools(v) {
+        let name = ToolNamespaces::flat_name(namespace, tool["name"].as_str().unwrap_or_default());
+        if !tools.iter().any(|known| known.name == name) {
+            tools.push(responses_tool(name, tool));
+        }
+    }
     let tool_choice = if tools.is_empty() {
         None
     } else {
@@ -884,16 +1040,18 @@ fn responses_usage(u: &Usage) -> Value {
         "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}})
 }
 
-pub fn chat_to_responses(resp: &ChatResponse) -> Value {
+pub fn chat_to_responses(resp: &ChatResponse, namespaces: &ToolNamespaces) -> Value {
     let mut output = Vec::new();
     for (i, block) in resp.content.iter().enumerate() {
         match block {
             ContentBlock::Text { text } => output.push(json!({"type": "message", "id": format!("msg_{i}"),
                 "status": "completed", "role": "assistant",
                 "content": [{"type": "output_text", "text": text, "annotations": []}]})),
-            ContentBlock::ToolUse { id, name, input } => output.push(json!({"type": "function_call",
-                "id": format!("fc_{i}"), "call_id": id, "name": name, "arguments": input.to_string(),
-                "status": "completed"})),
+            ContentBlock::ToolUse { id, name, input } => output.push(namespaces.call_item(
+                name,
+                json!({"type": "function_call", "id": format!("fc_{i}"), "call_id": id,
+                    "arguments": input.to_string(), "status": "completed"}),
+            )),
             _ => {}
         }
     }
@@ -934,11 +1092,19 @@ pub struct ResponsesEncoder {
     stop: Option<StopReason>,
     usage: Usage,
     finished: bool,
+    namespaces: ToolNamespaces,
 }
 
 impl ResponsesEncoder {
+    /// Report calls to the request's namespaced tools under their namespace.
+    pub fn with_namespaces(mut self, namespaces: ToolNamespaces) -> Self {
+        self.namespaces = namespaces;
+        self
+    }
+
     pub fn new(model: impl Into<String>) -> Self {
         ResponsesEncoder {
+            namespaces: ToolNamespaces::default(),
             id: format!("resp_turnout_{}", now()),
             model: model.into(),
             seq: 0,
@@ -1012,8 +1178,11 @@ impl ResponsesEncoder {
                     "response.function_call_arguments.done",
                     json!({"item_id": item_id, "output_index": index, "arguments": args}),
                 ));
-                let item = json!({"type": "function_call", "id": item_id, "call_id": call_id, "name": name,
-                    "arguments": args, "status": "completed"});
+                let item = self.namespaces.call_item(
+                    &name,
+                    json!({"type": "function_call", "id": item_id, "call_id": call_id,
+                        "arguments": args, "status": "completed"}),
+                );
                 out.push(self.ev(
                     "response.output_item.done",
                     json!({"output_index": index, "item": item}),
@@ -1107,12 +1276,12 @@ impl StreamEncoder for ResponsesEncoder {
                         .clone()
                         .unwrap_or_else(|| format!("call_turnout_{slot}"));
                     let name = delta.name.clone().unwrap_or_default();
-                    let (item_id, index) = self.open_item(
-                        "fc",
+                    let added = self.namespaces.call_item(
+                        &name,
                         json!({"type": "function_call", "status": "in_progress",
-                        "call_id": call_id, "name": name, "arguments": ""}),
-                        &mut out,
+                            "call_id": call_id, "arguments": ""}),
                     );
+                    let (item_id, index) = self.open_item("fc", added, &mut out);
                     self.open = ROpen::Tool {
                         slot,
                         item_id,
@@ -1538,5 +1707,138 @@ mod tests {
             "{\"p\":\".\"}"
         );
         assert_eq!(o["choices"][0]["message"]["content"], Value::Null);
+    }
+
+    /// The shape Codex 0.16x sends (recorded from a real request, trimmed).
+    fn namespaced_request() -> Value {
+        json!({
+            "model": "gpt-6.1-sol",
+            "tools": [{"type": "function", "name": "mcp__server__tool", "parameters": {"type": "object"}}],
+            "input": [
+                {"type": "additional_tools", "tools": [{
+                    "type": "namespace",
+                    "name": "collaboration",
+                    "description": "Tools for spawning and managing sub-agents.",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "strict": false,
+                        "parameters": {"type": "object", "properties": {
+                            "task_name": {"type": "string"},
+                            "message": {"type": "string", "encrypted": true}
+                        }, "required": ["task_name", "message"]}
+                    }]
+                }]},
+                {"type": "message", "role": "user", "content": "spawn one"},
+                {"type": "function_call", "namespace": "collaboration", "name": "spawn_agent",
+                    "call_id": "c0", "arguments": "{\"task_name\":\"a\",\"message\":\"m\"}"},
+                {"type": "function_call_output", "call_id": "c0", "output": "spawned"}
+            ]
+        })
+    }
+
+    #[test]
+    fn a_sub_agent_receives_the_task_codex_mails_it() {
+        // Recorded from a real spawn: the task is an `agent_message` whose
+        // payload sits in an `encrypted_content` part.
+        let request = json!({
+            "model": "evren/deepseek-v4.1-flash",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context/>"}]},
+                {"type": "agent_message", "content": [
+                    {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"},
+                    {"type": "encrypted_content", "encrypted_content": "reply with exactly PONG"}
+                ]},
+                {"type": "agent_message", "content": [
+                    {"type": "encrypted_content", "encrypted_content": "gAAAAABq-ciphertext"}
+                ]}
+            ]
+        });
+        let chat = responses_to_chat(&request, ProtocolDialect::OpenAiChat, None).unwrap();
+        let texts: Vec<String> = chat
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("NEW_TASK") && t.contains("reply with exactly PONG")), "{texts:?}");
+        // OpenAI ciphertext is never forwarded as if it were the task.
+        assert!(texts.iter().all(|t| !t.contains("gAAAA")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("not readable")), "{texts:?}");
+    }
+
+    #[test]
+    fn namespaced_codex_tools_reach_the_provider_under_flat_names() {
+        let request = responses_to_chat(&namespaced_request(), ProtocolDialect::OpenAiChat, None).unwrap();
+        let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["mcp__server__tool", "collaboration__spawn_agent"]);
+        // The schema travels otherwise unchanged, but without OpenAI's
+        // `encrypted` hint: an encrypted task only an OpenAI model can read
+        // would reach a DeepSeek worker as nothing.
+        let message = &request.tools[1].input_schema["properties"]["message"];
+        assert_eq!(message["type"], "string");
+        assert!(message.get("encrypted").is_none(), "{message}");
+        // An earlier namespaced call is replayed under the same flat name, so
+        // the model sees its own call next to the tool it called.
+        let replayed = request.messages.iter().find_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(replayed.as_deref(), Some("collaboration__spawn_agent"));
+    }
+
+    #[test]
+    fn calls_to_namespaced_tools_go_back_to_codex_with_their_namespace() {
+        use relay_core::ToolCallDelta;
+        let namespaces = ToolNamespaces::from_responses_request(&namespaced_request());
+
+        // Whole response.
+        let resp = ChatResponse {
+            id: "1".into(),
+            model: "m".into(),
+            content: vec![
+                ContentBlock::ToolUse { id: "c1".into(), name: "collaboration__spawn_agent".into(), input: json!({}) },
+                ContentBlock::ToolUse { id: "c2".into(), name: "mcp__server__tool".into(), input: json!({}) },
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        };
+        let out = chat_to_responses(&resp, &namespaces);
+        assert_eq!(out["output"][0]["namespace"], "collaboration");
+        assert_eq!(out["output"][0]["name"], "spawn_agent");
+        // A name that merely contains `__` is not namespaced.
+        assert!(out["output"][1].get("namespace").is_none());
+        assert_eq!(out["output"][1]["name"], "mcp__server__tool");
+
+        // Stream: the item is namespaced when added and when done.
+        let mut enc = ResponsesEncoder::new("m").with_namespaces(namespaces);
+        let mut frames = enc.begin();
+        frames.extend(enc.push(StreamEvent::ToolCallDelta {
+            delta: ToolCallDelta {
+                index: 0,
+                id: Some("c1".into()),
+                name: Some("collaboration__spawn_agent".into()),
+                arguments_delta: Some("{}".into()),
+            },
+        }));
+        frames.extend(enc.finish());
+        let items: Vec<Value> = events(&frames)
+            .into_iter()
+            .filter(|(name, _)| name == "response.output_item.added" || name == "response.output_item.done")
+            .map(|(_, data)| data["item"].clone())
+            .collect();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert_eq!(item["namespace"], "collaboration", "{item}");
+            assert_eq!(item["name"], "spawn_agent", "{item}");
+        }
     }
 }

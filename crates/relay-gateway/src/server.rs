@@ -28,6 +28,7 @@ use crate::traffic::TrafficPolicy;
 use crate::convert::{
     anthropic_to_chat, chat_to_anthropic, chat_to_openai, chat_to_responses, openai_to_chat,
     responses_to_chat, AnthropicEncoder, OpenAiEncoder, ResponsesEncoder, StreamEncoder,
+    ToolNamespaces,
 };
 
 const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -529,6 +530,12 @@ async fn handle_chat(
         value.get("stream").and_then(Value::as_bool).unwrap_or(false),
     );
     let traffic = &config.traffic;
+    // Namespaced Codex tools travel under flat names; replies map them back.
+    let namespaces = if dialect == Dialect::Responses {
+        ToolNamespaces::from_responses_request(&value)
+    } else {
+        ToolNamespaces::default()
+    };
     let mut last_error = None;
 
     for (index, (upstream, upstream_model)) in attempts.into_iter().enumerate() {
@@ -581,7 +588,15 @@ async fn handle_chat(
                     if index > 0 {
                         note_fallback(requested, &provider, &request.model);
                     }
-                    return deliver(served, dialect, response_model, &request.model, meter, permit);
+                    return deliver(
+                        served,
+                        dialect,
+                        response_model,
+                        &request.model,
+                        &namespaces,
+                        meter,
+                        permit,
+                    );
                 }
                 Err(error) if retryable(&error) => {
                     note_retry(requested, &provider, &request.model, &error);
@@ -623,6 +638,7 @@ fn deliver(
     dialect: Dialect,
     response_model: Option<String>,
     upstream_model: &str,
+    namespaces: &ToolNamespaces,
     mut meter: Option<RequestMeter>,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Response {
@@ -639,13 +655,13 @@ fn deliver(
             axum::Json(match dialect {
                 Dialect::Anthropic => chat_to_anthropic(&response),
                 Dialect::OpenAi => chat_to_openai(&response),
-                Dialect::Responses => chat_to_responses(&response),
+                Dialect::Responses => chat_to_responses(&response, namespaces),
             })
             .into_response()
         }
         Served::Stream(events) => {
             let model = response_model.unwrap_or_else(|| upstream_model.to_string());
-            sse_response(events, encoder_for(dialect, model), meter, permit)
+            sse_response(events, encoder_for(dialect, model, namespaces), meter, permit)
         }
     }
 }
@@ -673,11 +689,17 @@ fn retryable(error: &RelayError) -> bool {
     }
 }
 
-fn encoder_for(dialect: Dialect, response_model: String) -> Box<dyn StreamEncoder> {
+fn encoder_for(
+    dialect: Dialect,
+    response_model: String,
+    namespaces: &ToolNamespaces,
+) -> Box<dyn StreamEncoder> {
     match dialect {
         Dialect::Anthropic => Box::new(AnthropicEncoder::new(response_model)),
         Dialect::OpenAi => Box::new(OpenAiEncoder::new(response_model)),
-        Dialect::Responses => Box::new(ResponsesEncoder::new(response_model)),
+        Dialect::Responses => Box::new(
+            ResponsesEncoder::new(response_model).with_namespaces(namespaces.clone()),
+        ),
     }
 }
 

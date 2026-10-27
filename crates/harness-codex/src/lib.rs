@@ -37,8 +37,9 @@ fn model_catalog(
     default_model: &str,
     levels: &serde_json::Value,
     default_level: &str,
+    multi_agent: Option<&serde_json::Value>,
 ) -> String {
-    let entries = custom_entries(models, default_model, 0, levels, default_level);
+    let entries = custom_entries(models, default_model, 0, levels, default_level, multi_agent);
     serde_json::to_string_pretty(&json!({"models": entries}))
         .expect("model catalog is plain JSON")
 }
@@ -67,6 +68,17 @@ pub fn builtin_levels(catalog: &serde_json::Value) -> Option<serde_json::Value> 
         .max_by_key(|levels| levels.len())
         .filter(|levels| !levels.is_empty())
         .map(|levels| serde_json::Value::Array(levels.clone()))
+}
+
+/// The multi-agent protocol the installed Codex marks its own models with
+/// (`multi_agent_version`). Codex only lets `spawn_agent` start a model whose
+/// entry carries it, so a routed model without it can never be a sub-agent.
+pub fn builtin_multi_agent_version(catalog: &serde_json::Value) -> Option<serde_json::Value> {
+    catalog["models"]
+        .as_array()?
+        .iter()
+        .find_map(|model| model.get("multi_agent_version").filter(|v| !v.is_null()))
+        .cloned()
 }
 
 /// Hybrid catalog: Codex's built-in entries unchanged (they carry the real
@@ -100,6 +112,7 @@ fn hybrid_catalog(builtin: &serde_json::Value, models: &[String], default_model:
         after,
         &levels,
         default_level,
+        builtin_multi_agent_version(builtin).as_ref(),
     ));
     serde_json::to_string_pretty(&json!({"models": entries}))
         .expect("model catalog is plain JSON")
@@ -124,12 +137,13 @@ fn custom_entries(
     first_priority: i64,
     levels: &serde_json::Value,
     default_level: &str,
+    multi_agent: Option<&serde_json::Value>,
 ) -> Vec<serde_json::Value> {
     models
         .iter()
         .enumerate()
         .map(|(index, model)| {
-            json!({
+            let mut entry = json!({
                 "slug": model,
                 "display_name": model,
                 "description": if model == default_model {
@@ -147,7 +161,11 @@ fn custom_entries(
                 "truncation_policy": {"mode": "tokens", "limit": 10000},
                 "experimental_supported_tools": [],
                 "base_instructions": "You are Codex, an agent working with the user in their workspace until the task is complete. Use the shell and apply_patch tools as needed and be concise.",
-            })
+            });
+            if let Some(version) = multi_agent {
+                entry["multi_agent_version"] = version.clone();
+            }
+            entry
         })
         .collect()
 }
@@ -398,7 +416,13 @@ impl HarnessAdapter for CodexAdapter {
                     .as_ref()
                     .and_then(builtin_levels)
                     .unwrap_or_else(fallback_levels);
-                model_catalog(&ctx.models, &ctx.model, &levels, "medium")
+                model_catalog(
+                    &ctx.models,
+                    &ctx.model,
+                    &levels,
+                    "medium",
+                    builtin.as_ref().and_then(builtin_multi_agent_version).as_ref(),
+                )
             };
             if hybrid {
                 notes.push(
@@ -589,7 +613,8 @@ mod tests {
     fn hybrid_keeps_the_built_in_list_and_adds_custom_models_after_it() {
         let (_dir, adapter, route) = setup();
         let builtin = json!({"models": [
-            {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "priority": 1, "base_instructions": "real"},
+            {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "priority": 1, "base_instructions": "real",
+             "multi_agent_version": "v2"},
             {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "priority": 2, "base_instructions": "real"},
             {"slug": "codex-auto-review", "visibility": "hide", "priority": 43, "base_instructions": "real"},
         ]});
@@ -624,6 +649,9 @@ mod tests {
         );
         // Built-in entries are copied untouched, hidden ones stay hidden.
         assert_eq!(models[0]["display_name"], "GPT-6.1-Sol");
+        // Custom models carry the installed Codex's multi-agent version, or
+        // `spawn_agent` refuses them as sub-agent models.
+        assert_eq!(models[3]["multi_agent_version"], "v2");
         assert_eq!(models[0]["base_instructions"], "real");
         assert_eq!(models[2]["visibility"], "hide");
         // The custom model sorts after every built-in one.

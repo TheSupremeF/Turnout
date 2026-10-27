@@ -321,7 +321,24 @@ pub struct ResponsesChunkParser {
     model: String,
     id: String,
     tools: std::collections::BTreeMap<usize, (Option<String>, Option<String>)>,
+    /// Argument deltas per tool call, held until the call is complete.
+    arguments: std::collections::BTreeMap<usize, String>,
     used_tool: bool,
+}
+
+impl ResponsesChunkParser {
+    /// The finished arguments of call `index` as one delta.
+    fn arguments_event(&mut self, index: usize, arguments: String) -> StreamEvent {
+        let (id, name) = self.tools.get(&index).cloned().unwrap_or_default();
+        StreamEvent::ToolCallDelta {
+            delta: ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta: Some(arguments),
+            },
+        }
+    }
 }
 
 impl ResponsesChunkParser {
@@ -386,19 +403,30 @@ impl ResponsesChunkParser {
                     },
                 });
             }
+            // Arguments are held, not forwarded: the deltas are not always the
+            // whole call. A parameter marked `encrypted` (Codex's spawn_agent
+            // `message`) never appears in them and is only present, encrypted,
+            // in the finished item.
             "response.function_call_arguments.delta" => {
                 let index = value["output_index"].as_u64().unwrap_or(0) as usize;
-                let (id, name) = self.tools.get(&index).cloned().unwrap_or_default();
-                events.push(StreamEvent::ToolCallDelta {
-                    delta: ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta: value["delta"].as_str().map(str::to_string),
-                    },
-                });
+                if let Some(delta) = value["delta"].as_str() {
+                    self.arguments.entry(index).or_default().push_str(delta);
+                }
+            }
+            "response.output_item.done" if value["item"]["type"] == "function_call" => {
+                let index = value["output_index"].as_u64().unwrap_or(0) as usize;
+                let streamed = self.arguments.remove(&index).unwrap_or_default();
+                let arguments = value["item"]["arguments"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or(streamed);
+                events.push(self.arguments_event(index, arguments));
             }
             "response.completed" => {
+                // A call whose finished item never arrived keeps what streamed.
+                for (index, arguments) in std::mem::take(&mut self.arguments) {
+                    events.push(self.arguments_event(index, arguments));
+                }
                 let usage = &value["response"]["usage"];
                 events.push(StreamEvent::Usage {
                     usage: Usage {
@@ -786,5 +814,55 @@ mod tests {
                 .capabilities
                 .embeddings
         );
+    }
+
+    #[test]
+    fn a_tool_call_uses_the_finished_arguments_not_the_deltas() {
+        // Recorded shape: the `encrypted` parameter (`message`) is missing from
+        // the deltas and only present, encrypted, in the finished item.
+        let mut parser = ResponsesChunkParser::default();
+        let mut events = Vec::new();
+        for chunk in [
+            json!({"type": "response.created", "response": {"id": "r1", "model": "gpt-6.1-sol"}}),
+            json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "function_call", "call_id": "c1", "name": "collaboration__spawn_agent"}}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"task_name\":"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "\"probe\"}"}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": {"type": "function_call",
+                "call_id": "c1", "name": "collaboration__spawn_agent",
+                "arguments": "{\"task_name\":\"probe\",\"message\":\"gAAAA-encrypted\"}"}}),
+            json!({"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        ] {
+            events.extend(parser.parse(&chunk));
+        }
+        let arguments: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolCallDelta { delta } => delta.arguments_delta.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arguments, "{\"task_name\":\"probe\",\"message\":\"gAAAA-encrypted\"}");
+
+        // Without a finished item, what streamed is still delivered once.
+        let mut parser = ResponsesChunkParser::default();
+        let mut events = Vec::new();
+        for chunk in [
+            json!({"type": "response.created", "response": {"id": "r2", "model": "m"}}),
+            json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "function_call", "call_id": "c2", "name": "ls"}}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{}"}),
+            json!({"type": "response.completed", "response": {"usage": {}}}),
+        ] {
+            events.extend(parser.parse(&chunk));
+        }
+        let arguments: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolCallDelta { delta } => delta.arguments_delta.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arguments, ["{}"]);
     }
 }

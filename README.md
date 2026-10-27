@@ -160,8 +160,12 @@ has no worktree isolation, so parallel workers share the checkout and should
 get separate files to change; restart OpenCode to load a change.
 
 Codex needs no worker files: its manager picks a model for each sub-agent it
-spawns, from the models the Codex route already provides, so the route alone
-decides which workers are possible.
+spawns (`spawn_agent`), from the models the Codex route provides, so the route
+alone decides which workers are possible. A GPT manager can hand work to a
+DeepSeek worker: Turnout marks routed models as sub-agent capable in Codex's
+catalog, passes Codex's namespaced agent tools and inter-agent messages through,
+and asks OpenAI for plain-text task messages, since OpenAI-encrypted ones are
+readable only by OpenAI models.
 
 Each line in the request log (`requests/<harness>.jsonl` in the data
 directory) records the model that was asked for, the one that answered,
