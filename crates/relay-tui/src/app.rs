@@ -27,6 +27,16 @@ pub struct Picker {
     pub list: ListState,
 }
 
+/// Editing one model's fallback chain, opened from the picker (Ctrl+L).
+pub struct ChainEdit {
+    /// The picker to return to.
+    pub picker: Picker,
+    pub from: Target,
+    /// The chain being edited, in order.
+    pub chain: Vec<Target>,
+    pub cursor: usize,
+}
+
 pub struct Review {
     pub harness: usize,
     pub text: String,
@@ -214,6 +224,7 @@ pub enum Modal {
     Output(Output),
     Confirm(Confirm),
     Picker(Picker),
+    Chain(ChainEdit),
     Review(Review),
     Conn(Conn),
     Message(Message),
@@ -403,6 +414,10 @@ impl App {
             }
             Msg::Plan(harness, Ok(text)) => {
                 if let Some(Modal::Busy(_)) = self.modal {
+                    let text = match self.turnout_section(harness) {
+                        Some(section) => format!("{text}\n\n{section}"),
+                        None => text,
+                    };
                     self.modal = Some(Modal::Review(Review {
                         harness,
                         text,
@@ -526,6 +541,7 @@ impl App {
             Some(Modal::Output(output)) => self.output_key(output, key),
             Some(Modal::Confirm(confirm)) => self.confirm_key(confirm, key),
             Some(Modal::Picker(picker)) => self.picker_key(picker, key),
+            Some(Modal::Chain(edit)) => self.chain_key(edit, key),
             Some(Modal::Review(review)) => self.review_key(review, key),
             Some(Modal::Conn(conn)) => self.conn_key(conn, key),
             Some(Modal::Message(_)) | Some(Modal::Help) => {}
@@ -911,6 +927,28 @@ impl App {
                 selection.hybrid = !selection.hybrid;
             }
             KeyCode::Char('r') if ctrl => self.ensure_catalog(&provider, true),
+            KeyCode::Char('f') if ctrl => {
+                let selection = &mut self.drafts[picker.harness];
+                selection.fallback = !selection.fallback;
+            }
+            KeyCode::Char('l') if ctrl => match target {
+                Some(target) if self.drafts[picker.harness].contains(&target) => {
+                    let chain = self.drafts[picker.harness]
+                        .chains
+                        .get(&target)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.modal = Some(Modal::Chain(ChainEdit {
+                        picker,
+                        from: target,
+                        chain,
+                        cursor: 0,
+                    }));
+                    return;
+                }
+                Some(_) => self.say("Önce modeli seçin (␣); fallback yalnızca seçili modeller arasında olur", false),
+                None => {}
+            },
             KeyCode::Right | KeyCode::Tab => {
                 picker.tab = (picker.tab + 1) % tabs.len();
                 picker.list.select(Some(0));
@@ -938,6 +976,95 @@ impl App {
             _ => {}
         }
         self.modal = Some(Modal::Picker(picker));
+    }
+
+    /// The models `edit.from` may fall back to: the other selected models.
+    pub fn chain_candidates(&self, edit: &ChainEdit) -> Vec<Target> {
+        self.drafts[edit.picker.harness]
+            .targets
+            .iter()
+            .filter(|target| **target != edit.from)
+            .cloned()
+            .collect()
+    }
+
+    fn chain_key(&mut self, mut edit: ChainEdit, key: KeyEvent) {
+        let candidates = self.chain_candidates(&edit);
+        let current = candidates.get(edit.cursor).cloned();
+        match key.code {
+            // Esc leaves the chain as it was.
+            KeyCode::Esc => {
+                self.modal = Some(Modal::Picker(edit.picker));
+                return;
+            }
+            KeyCode::Enter => {
+                let selection = &mut self.drafts[edit.picker.harness];
+                if edit.chain.is_empty() {
+                    selection.chains.remove(&edit.from);
+                } else {
+                    selection.chains.insert(edit.from.clone(), edit.chain);
+                }
+                self.modal = Some(Modal::Picker(edit.picker));
+                return;
+            }
+            KeyCode::Up | KeyCode::Char('k') => edit.cursor = edit.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                edit.cursor = (edit.cursor + 1).min(candidates.len().saturating_sub(1))
+            }
+            KeyCode::Char(' ') => {
+                if let Some(target) = current {
+                    match edit.chain.iter().position(|item| *item == target) {
+                        Some(index) => {
+                            edit.chain.remove(index);
+                        }
+                        None => edit.chain.push(target),
+                    }
+                }
+            }
+            // Order within the chain: + earlier, - later.
+            KeyCode::Char('+') | KeyCode::Char('-') => {
+                if let Some(index) = current.and_then(|t| edit.chain.iter().position(|i| *i == t)) {
+                    let to = if key.code == KeyCode::Char('+') {
+                        index.saturating_sub(1)
+                    } else {
+                        (index + 1).min(edit.chain.len() - 1)
+                    };
+                    edit.chain.swap(index, to);
+                }
+            }
+            _ => {}
+        }
+        self.modal = Some(Modal::Chain(edit));
+    }
+
+    /// Fallback lives in Turnout's own state, not in the harness file, so the
+    /// diff alone would hide it: list what the plan sets, next to what is saved.
+    pub fn turnout_section(&self, harness: usize) -> Option<String> {
+        let id = HARNESSES[harness].0;
+        let draft = &self.drafts[harness];
+        let saved = self.saved.get(id).cloned().unwrap_or_default();
+        if !draft.fallback && !saved.fallback && draft.chains.is_empty() && saved.chains.is_empty() {
+            return None;
+        }
+        let onoff = |on: bool| if on { "açık" } else { "kapalı" };
+        let mut lines = vec!["TURNOUT AYARLARI  (harness dosyasında görünmez)".to_string()];
+        let changed = if draft.fallback != saved.fallback { "   değişti" } else { "" };
+        lines.push(format!("  fallback (rota geneli)   {}{changed}", onoff(draft.fallback)));
+        let names = |chain: &[Target]| chain.iter().map(|t| t.model.clone()).collect::<Vec<_>>().join(", ");
+        for (from, chain) in &draft.chains {
+            let state = match saved.chains.get(from) {
+                None => "yeni",
+                Some(old) if old == chain => "aynı",
+                Some(_) => "değişti",
+            };
+            lines.push(format!("  {} → {}   {state}", from.model, names(chain)));
+        }
+        for (from, chain) in &saved.chains {
+            if !draft.chains.contains_key(from) {
+                lines.push(format!("  {} → {}   kaldırılacak", from.model, names(chain)));
+            }
+        }
+        Some(lines.join("\n"))
     }
 
     fn start_plan(&mut self) {

@@ -522,4 +522,39 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.quit);
     }
+
+    #[test]
+    fn fallback_is_set_in_the_picker_and_shown_in_the_review() {
+        let mut a = app();
+        a.cursor = 1; // Claude Code
+        press(&mut a, KeyCode::Enter); // picker on EVREN
+        press(&mut a, KeyCode::Char(' ')); // pick deepseek
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Char(' ')); // pick glm
+        press(&mut a, KeyCode::Up);
+        let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+        a.handle_key(ctrl(KeyCode::Char('f')));
+        assert!(a.drafts[1].fallback);
+        assert!(screen(&mut a, 100, 30).contains("(açık)"));
+
+        // Ctrl+L on deepseek: its chain can only name the other picked model.
+        a.handle_key(ctrl(KeyCode::Char('l')));
+        let chain_screen = screen(&mut a, 100, 30);
+        assert!(chain_screen.contains("Fallback — deepseek-v4.1-flash"), "{chain_screen}");
+        assert!(chain_screen.contains("glm-5.3"));
+        press(&mut a, KeyCode::Char(' '));
+        press(&mut a, KeyCode::Enter);
+        let deepseek = Target::new("evren", "deepseek-v4.1-flash");
+        assert_eq!(a.drafts[1].chains[&deepseek], vec![Target::new("evren", "glm-5.3")]);
+        assert!(screen(&mut a, 100, 30).contains("↳ fallback: glm-5.3"));
+
+        // The review lists what the diff cannot show.
+        press(&mut a, KeyCode::Esc);
+        a.modal = Some(Modal::Busy("plan".into()));
+        a.apply_message(Msg::Plan(1, Ok("--- a/settings.json\n+++ b/settings.json".into())));
+        let review = screen(&mut a, 100, 30);
+        assert!(review.contains("TURNOUT AYARLARI"), "{review}");
+        assert!(review.contains("deepseek-v4.1-flash → glm-5.3   yeni"), "{review}");
+        assert!(review.contains("fallback (rota geneli)   açık   değişti"), "{review}");
+    }
 }

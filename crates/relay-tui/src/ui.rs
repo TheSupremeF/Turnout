@@ -37,6 +37,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Modal::Output(output) => output_dialog(frame, output, area),
             Modal::Confirm(confirm) => confirm_dialog(frame, confirm, area),
             Modal::Picker(picker) => picker_dialog(frame, app, picker, area),
+            Modal::Chain(edit) => chain_dialog(frame, app, edit, area),
             Modal::Review(review) => review_dialog(frame, review, area),
             Modal::Conn(conn) => conn_dialog(frame, app, conn, area),
             Modal::Message(message) => message_dialog(frame, message, area),
@@ -264,7 +265,7 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
     let tabs = app.tabs();
     let provider = tabs[picker.tab].clone();
     let shown = app.entries(&provider, &picker.query).len().max(4) as u16;
-    let footer = if harness == CLAUDE { 2 } else { 1 };
+    let footer = if harness == CLAUDE { 3 } else { 2 };
     let height = (shown + 4 + footer + 2).clamp(12, area.height.saturating_sub(2).max(12));
     let rect = centered(area, 84, height);
     frame.render_widget(Clear, rect);
@@ -281,7 +282,7 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(if harness == CLAUDE { 2 } else { 1 }),
+            Constraint::Length(footer),
         ])
         .split(inner);
 
@@ -374,6 +375,10 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
                 if is_default {
                     spans.push(Span::styled("  ★ varsayılan", Style::default().fg(AMBER)));
                 }
+                if let Some(chain) = draft.chains.get(&target) {
+                    let names = chain.iter().map(|t| t.model.as_str()).collect::<Vec<_>>().join(", ");
+                    spans.push(Span::styled(format!("  ↳ fallback: {names}"), dim()));
+                }
                 if !is_chat_model(model) {
                     spans.push(Span::styled(
                         "  sohbet modeli değil",
@@ -389,14 +394,25 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
         frame.render_stateful_widget(list, rows[4], &mut picker.list);
     }
 
-    let mut footer = vec![keys(&[
-        ("␣", "seç"),
-        ("⏎", "varsayılan yap"),
-        ("←→", "sağlayıcı"),
-        ("yaz", "ara"),
-        ("Ctrl+R", "listeyi yenile"),
-        ("Esc", "bitti"),
-    ])];
+    let fallback = draft.fallback;
+    let mut footer = vec![
+        Line::from(vec![
+            Span::styled("Ctrl+F ", bold(ACCENT)),
+            Span::styled(
+                if fallback { "[x] " } else { "[ ] " },
+                Style::default().fg(if fallback { MINT } else { DIM }),
+            ),
+            Span::styled("Hata verirse rotadaki diğer modellere geç ", text()),
+            Span::styled(if fallback { "(açık)" } else { "(kapalı)" }, dim()),
+        ]),
+        keys(&[
+            ("␣", "seç"),
+            ("⏎", "varsayılan"),
+            ("Ctrl+L", "bu modelin fallback'i"),
+            ("←→", "sağlayıcı"),
+            ("Esc", "bitti"),
+        ]),
+    ];
     if harness == CLAUDE {
         let on = draft.hybrid;
         footer.insert(
@@ -412,6 +428,53 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
         );
     }
     frame.render_widget(Paragraph::new(footer), rows[5]);
+}
+
+// ---- fallback chain -------------------------------------------------------------
+
+fn chain_dialog(frame: &mut Frame, app: &App, edit: &crate::app::ChainEdit, area: Rect) {
+    let candidates = app.chain_candidates(edit);
+    let height = (candidates.len().max(1) as u16 + 9).min(area.height.saturating_sub(2).max(9));
+    let rect = centered(area, 76, height);
+    frame.render_widget(Clear, rect);
+    let block = dialog(&format!("Fallback — {}", edit.from.model), ACCENT);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{} hata verirse (429, aşırı yük, ulaşılamıyor) sırayla:", edit.from.model),
+            text(),
+        )),
+        Line::from(""),
+    ];
+    if candidates.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Seçili başka model yok — önce modellere ekleyin.",
+            dim(),
+        )));
+    }
+    for (index, target) in candidates.iter().enumerate() {
+        let order = edit.chain.iter().position(|item| item == target);
+        let marker = if index == edit.cursor { "▌ " } else { "  " };
+        let mut spans = vec![Span::styled(marker, Style::default().fg(ACCENT))];
+        spans.push(match order {
+            Some(n) => Span::styled(format!("{} ◉ ", n + 1), bold(ACCENT)),
+            None => Span::styled("  ○ ", Style::default().fg(FAINT)),
+        });
+        spans.push(Span::styled(
+            format!("{}  {}", target.model, provider_name(&target.provider)),
+            if order.is_some() { bold(theme::TEXT) } else { text() },
+        ));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Önce aynı model 2 kez yeniden denenir. Yanıt akmaya başladıysa başka modele geçilmez.",
+        dim(),
+    )));
+    lines.push(Line::from(""));
+    lines.push(keys(&[("␣", "ekle/çıkar"), ("+ -", "sıra"), ("⏎", "tamam"), ("Esc", "vazgeç")]));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 // ---- plan review ------------------------------------------------------------
@@ -447,8 +510,16 @@ fn review_dialog(frame: &mut Frame, review: &mut Review, area: Rect) {
                 Style::default().fg(RED)
             } else if line.starts_with("@@") {
                 Style::default().fg(ACCENT)
-            } else if line.starts_with("note:") {
+            } else if line.starts_with("note:") || line.starts_with('⚠') {
                 Style::default().fg(AMBER)
+            } else if line.starts_with("TURNOUT AYARLARI") {
+                bold(DIM)
+            } else if line.ends_with("kaldırılacak") {
+                Style::default().fg(RED)
+            } else if line.ends_with("yeni") || line.ends_with("değişti") {
+                Style::default().fg(MINT)
+            } else if line.starts_with("  ") && line.contains(" → ") || line.starts_with("  fallback") {
+                text()
             } else if line.starts_with("plan ") {
                 bold(MINT)
             } else {
