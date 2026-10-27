@@ -186,6 +186,8 @@ pub struct HarnessInfo {
 pub struct ProviderInfo {
     pub id: String,
     pub has_key: bool,
+    /// Most requests the gateway sends at once; `None` is unlimited.
+    pub max_concurrent: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -299,6 +301,7 @@ impl Backend {
                         Some(ProviderInfo {
                             id: item["id"].as_str()?.to_string(),
                             has_key: item["has_key"].as_bool().unwrap_or(false),
+                            max_concurrent: item["max_concurrent"].as_u64().map(|n| n as u32),
                         })
                     })
                     .collect()

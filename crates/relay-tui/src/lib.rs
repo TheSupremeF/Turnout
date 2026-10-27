@@ -109,10 +109,12 @@ mod tests {
             ProviderInfo {
                 id: "evren".into(),
                 has_key: true,
+                max_concurrent: None,
             },
             ProviderInfo {
                 id: "openai".into(),
                 has_key: true,
+                max_concurrent: None,
             },
         ];
         app.oauth = vec![OauthInfo {
@@ -556,5 +558,27 @@ mod tests {
         assert!(review.contains("TURNOUT AYARLARI"), "{review}");
         assert!(review.contains("deepseek-v4.1-flash → glm-5.3   yeni"), "{review}");
         assert!(review.contains("fallback (rota geneli)   açık   değişti"), "{review}");
+    }
+
+    #[test]
+    fn a_provider_limit_is_shown_and_validated_in_connections() {
+        let mut a = app();
+        a.providers[0].max_concurrent = Some(4);
+        press(&mut a, KeyCode::Char('c'));
+        let list = screen(&mut a, 100, 30);
+        assert!(list.contains("en fazla 4 aynı anda"), "{list}");
+        assert!(list.contains("sınırsız"), "{list}");
+        assert!(list.contains("l sınır"), "{list}");
+
+        press(&mut a, KeyCode::Char('l'));
+        press(&mut a, KeyCode::Backspace);
+        type_text(&mut a, "0");
+        press(&mut a, KeyCode::Enter);
+        let error = screen(&mut a, 100, 30);
+        assert!(error.contains("Sınır en az 1 olmalı"), "{error}");
+        // Still in the editor: nothing was sent.
+        assert!(matches!(a.modal, Some(Modal::Conn(_))));
+        press(&mut a, KeyCode::Esc);
+        assert!(screen(&mut a, 100, 30).contains("l sınır"));
     }
 }

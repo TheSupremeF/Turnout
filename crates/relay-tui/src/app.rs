@@ -59,6 +59,12 @@ pub enum ConnMode {
         secret: String,
     },
     ConfirmDelete(String),
+    /// Editing a provider's concurrency limit; empty input means unlimited.
+    Limit {
+        provider: String,
+        input: String,
+        error: Option<String>,
+    },
 }
 
 pub const DIALECTS: [&str; 3] = ["openai-chat", "openai-responses", "anthropic-messages"];
@@ -247,6 +253,8 @@ pub enum Msg {
     Applied(Result<String, String>),
     Tested(Result<String, String>),
     Provider(Result<String, String>),
+    /// `providers limit` finished: (provider, new limit, CLI result).
+    Limit(String, Option<u32>, Result<String, String>),
     Cli {
         title: String,
         ok: bool,
@@ -445,6 +453,31 @@ impl App {
                 self.reload_connections();
             }
             Msg::Provider(Err(error)) => self.message("Sağlayıcı işlemi başarısız", error, false),
+            Msg::Limit(provider, limit, Ok(text)) => {
+                self.reload_connections();
+                self.modal = Some(Modal::Conn(Conn {
+                    cursor: self.providers.iter().position(|p| p.id == provider).unwrap_or(0),
+                    mode: ConnMode::List,
+                }));
+                let name = crate::data::provider_name(&provider);
+                let value = match limit {
+                    Some(n) => format!("en fazla {n} aynı anda"),
+                    None => "sınırsız".to_string(),
+                };
+                let agent = if text.contains("restarted") {
+                    " · Turnout Agent yeniden başlatıldı"
+                } else {
+                    ""
+                };
+                self.say(format!("✓ {name}: {value}{agent}"), true);
+            }
+            Msg::Limit(provider, _, Err(error)) => {
+                self.modal = Some(Modal::Conn(Conn {
+                    cursor: self.providers.iter().position(|p| p.id == provider).unwrap_or(0),
+                    mode: ConnMode::List,
+                }));
+                self.say(format!("Sınır kaydedilemedi: {}", error.lines().last().unwrap_or("")), false);
+            }
             Msg::Cli {
                 title,
                 ok,
@@ -1145,6 +1178,63 @@ impl App {
                     }
                 }
                 KeyCode::Char('r') => self.reload_connections(),
+                KeyCode::Char('l') => {
+                    if let Some(provider) = self.providers.get(conn.cursor) {
+                        conn.mode = ConnMode::Limit {
+                            provider: provider.id.clone(),
+                            input: provider.max_concurrent.map(|n| n.to_string()).unwrap_or_default(),
+                            error: None,
+                        };
+                    }
+                }
+                _ => {}
+            },
+            ConnMode::Limit {
+                ref provider,
+                ref mut input,
+                ref mut error,
+            } => match key.code {
+                KeyCode::Esc => conn.mode = ConnMode::List,
+                KeyCode::Backspace => {
+                    input.pop();
+                    *error = None;
+                }
+                KeyCode::Char(c) if input.len() < 6 && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.push(c);
+                    *error = None;
+                }
+                KeyCode::Enter => {
+                    let value = input.trim();
+                    let limit = if value.is_empty() {
+                        Ok(None)
+                    } else {
+                        match value.parse::<u32>() {
+                            Ok(0) => Err("Sınır en az 1 olmalı. Sınırı kaldırmak için kutuyu boş bırakın."),
+                            Ok(n) => Ok(Some(n)),
+                            Err(_) => Err("Yalnızca bir sayı girin (örnek: 4). Sınırsız için boş bırakın."),
+                        }
+                    };
+                    match limit {
+                        Err(message) => *error = Some(message.to_string()),
+                        Ok(limit) => {
+                            let provider = provider.clone();
+                            let mut args = vec!["providers".to_string(), "limit".into(), provider.clone()];
+                            match limit {
+                                Some(n) => {
+                                    args.push("--max-concurrent".into());
+                                    args.push(n.to_string());
+                                }
+                                None => args.push("--clear".into()),
+                            }
+                            self.modal = Some(Modal::Busy("Sınır kaydediliyor…".into()));
+                            self.spawn(move |backend| {
+                                let (ok, text) = backend.run_both(&args);
+                                Msg::Limit(provider, limit, if ok { Ok(text) } else { Err(text) })
+                            });
+                            return;
+                        }
+                    }
+                }
                 _ => {}
             },
             ConnMode::Preset => match key.code {

@@ -549,10 +549,11 @@ fn review_dialog(frame: &mut Frame, review: &mut Review, area: Rect) {
 // ---- connections --------------------------------------------------------------
 
 fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
-    let extra = if matches!(conn.mode, ConnMode::Custom { .. }) {
-        5
-    } else {
-        0
+    let extra = match conn.mode {
+        ConnMode::Custom { .. } => 5,
+        // Title, two wrapped lines of explanation, input, hint or error, keys.
+        ConnMode::Limit { .. } => 6,
+        _ => 0,
     };
     let rows = 7 + app.oauth.len().max(1) + app.providers.len().max(1) + 1 + extra;
     let rect = centered(
@@ -627,6 +628,13 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
                 if selected { bold(theme::TEXT) } else { text() },
             ),
             Span::styled(format!("  {note}"), Style::default().fg(color)),
+            Span::styled(
+                match provider.max_concurrent {
+                    Some(n) => format!("   en fazla {n} aynı anda"),
+                    None => "   sınırsız".to_string(),
+                },
+                dim(),
+            ),
         ]);
         if selected {
             line = line.style(Style::default().bg(PANEL));
@@ -638,9 +646,35 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
         ConnMode::List => lines.push(keys(&[
             ("n", "yeni"),
             ("d", "kaldır"),
+            ("l", "sınır"),
             ("r", "yenile"),
             ("Esc", "kapat"),
         ])),
+        ConnMode::Limit {
+            provider,
+            input,
+            error,
+        } => {
+            let name = provider_name(provider);
+            lines.push(Line::from(Span::styled(
+                format!("Eşzamanlı istek sınırı — {name}"),
+                bold(ACCENT),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("Aynı anda {name}'e gidebilecek en fazla istek. Fazlası sırada bekler (en fazla 2 dakika). Codex, Claude Code ve OpenCode bu sınırı paylaşır."),
+                text(),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("› ", Style::default().fg(ACCENT)),
+                Span::styled(input.clone(), text()),
+                Span::styled("▏", Style::default().fg(ACCENT)),
+            ]));
+            match error {
+                Some(message) => lines.push(Line::from(Span::styled(format!("✗ {message}"), Style::default().fg(RED)))),
+                None => lines.push(Line::from(Span::styled("Boş bırakın: sınırsız", dim()))),
+            }
+            lines.push(keys(&[("⏎", "kaydet"), ("Esc", "vazgeç")]));
+        }
         ConnMode::Preset => lines.push(keys(&[
             ("e", "EVREN"),
             ("a", "Anthropic API"),
