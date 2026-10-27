@@ -34,6 +34,15 @@ impl AnthropicProvider {
         })
     }
 
+    /// Remember the rate-limit headers this provider sends on its responses.
+    pub fn with_header_sink(
+        mut self,
+        sink: Option<std::sync::Arc<dyn relay_core::HeaderSink>>,
+    ) -> Self {
+        self.http = self.http.with_header_sink(sink);
+        self
+    }
+
     /// `x-api-key` by default; gateways that expect a bearer token set
     /// `extra.auth = "bearer"` on the provider config.
     pub fn headers(&self) -> Result<HeaderMap> {

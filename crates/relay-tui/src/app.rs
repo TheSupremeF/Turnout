@@ -106,6 +106,11 @@ pub enum ConnMode {
         secret: String,
     },
     ConfirmDelete(String),
+    /// What the provider says is left of its credits and token budget.
+    Quota {
+        provider: String,
+        quota: crate::data::QuotaInfo,
+    },
     /// Editing a provider's concurrency limit; empty input means unlimited.
     Limit {
         provider: String,
@@ -305,6 +310,8 @@ pub enum Msg {
     Provider(Result<String, String>),
     /// `providers limit` finished: (provider, new limit, CLI result).
     Limit(String, Option<u32>, Result<String, String>),
+    /// `providers quota` finished.
+    Quota(String, Result<crate::data::QuotaInfo, String>),
     Agents(usize, Result<AgentsInfo, String>),
     /// An agent or manager plan is ready to review.
     AgentPlan(usize, ReviewAction, Result<String, String>),
@@ -589,6 +596,17 @@ impl App {
                     mode: ConnMode::List,
                 }));
                 self.say(format!("Sınır kaydedilemedi: {}", error.lines().last().unwrap_or("")), false);
+            }
+            Msg::Quota(provider, result) => {
+                let cursor = self.providers.iter().position(|p| p.id == provider).unwrap_or(0);
+                let mode = match result {
+                    Ok(quota) => ConnMode::Quota { provider, quota },
+                    Err(error) => {
+                        self.say(format!("Kota okunamadı: {error}"), false);
+                        ConnMode::List
+                    }
+                };
+                self.modal = Some(Modal::Conn(Conn { cursor, mode }));
             }
             Msg::Cli {
                 title,
@@ -1504,6 +1522,14 @@ impl App {
         });
     }
 
+    fn ask_quota(&mut self, provider: String) {
+        self.modal = Some(Modal::Busy("Kota soruluyor…".into()));
+        self.spawn(move |backend| {
+            let result = backend.quota(&provider);
+            Msg::Quota(provider, result)
+        });
+    }
+
     fn conn_key(&mut self, mut conn: Conn, key: KeyEvent) {
         let count = self.providers.len();
         match &mut conn.mode {
@@ -1520,6 +1546,12 @@ impl App {
                     }
                 }
                 KeyCode::Char('r') => self.reload_connections(),
+                KeyCode::Char('u') => {
+                    if let Some(provider) = self.providers.get(conn.cursor) {
+                        self.ask_quota(provider.id.clone());
+                        return;
+                    }
+                }
                 KeyCode::Char('l') => {
                     if let Some(provider) = self.providers.get(conn.cursor) {
                         conn.mode = ConnMode::Limit {
@@ -1528,6 +1560,14 @@ impl App {
                             error: None,
                         };
                     }
+                }
+                _ => {}
+            },
+            ConnMode::Quota { ref provider, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Enter => conn.mode = ConnMode::List,
+                KeyCode::Char('r') => {
+                    self.ask_quota(provider.clone());
+                    return;
                 }
                 _ => {}
             },

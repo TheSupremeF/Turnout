@@ -52,6 +52,15 @@ impl OpenAiCompatible {
         &self.http
     }
 
+    /// Remember the rate-limit headers this provider sends on its responses.
+    pub fn with_header_sink(
+        mut self,
+        sink: Option<std::sync::Arc<dyn relay_core::HeaderSink>>,
+    ) -> Self {
+        self.http = self.http.with_header_sink(sink);
+        self
+    }
+
     pub fn headers(&self) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         if let Some(key) = &self.api_key {

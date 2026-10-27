@@ -16,6 +16,7 @@ pub mod harness;
 pub mod model;
 pub mod plan;
 pub mod provider;
+pub mod quota;
 pub mod session;
 pub mod transport;
 
@@ -39,4 +40,5 @@ pub use session::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, MessageContent, Role, StopReason,
     StreamEvent, ToolCallDelta, ToolDef,
 };
+pub use quota::{HeaderSink, QuotaSink};
 pub use transport::{redact_secrets, HttpClient, SseFrame};

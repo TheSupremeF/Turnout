@@ -230,6 +230,13 @@ enum ProvidersCmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Ask the provider how many credits and tokens are left (EVREN's `/quota`)
+    Quota {
+        id: String,
+        /// Print the provider's raw answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -368,6 +375,7 @@ async fn run(cli: Cli) -> Result<()> {
     };
     match command {
         Cmd::Auth(cmd) => auth(&home, cmd).await,
+        Cmd::Providers(ProvidersCmd::Quota { id, json }) => provider_quota(&home, &id, json).await,
         Cmd::Providers(cmd) => providers(&home, cmd),
         Cmd::Models(ModelsCmd::List { provider }) => {
             let adapter = provider_adapter(&home, &provider)?;
@@ -1394,7 +1402,152 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
             }
             Ok(())
         }
+        ProvidersCmd::Quota { .. } => unreachable!("dispatched in run()"),
     }
+}
+
+async fn provider_quota(home: &Home, id: &str, json: bool) -> Result<()> {
+    let id = ProviderId::new(id);
+    let Some(config) = home.providers()?.into_iter().find(|p| p.id == id) else {
+        bail!("no provider named `{id}`");
+    };
+    let key = credential_store(home)
+        .ok()
+        .and_then(|store| store.get(&config.credential).ok().flatten());
+    // Only EVREN serves `/quota` today; any provider at a compatible URL works.
+    let live = provider_evren::EvrenProvider::new(config.base_url.clone(), key)?
+        .quota_summary()
+        .await;
+    let quota = match live {
+        Ok(quota) => quota,
+        // Most providers never answer `/quota`, but they do send their limits
+        // as headers on ordinary responses — use the last one we saw.
+        Err(error) => match captured_quota(home, id.as_str()) {
+            Some(quota) => quota,
+            None => match error {
+                relay_core::RelayError::ProviderStatus { status: 404, .. } => bail!(
+                    "`{id}` does not report its quota (no /quota endpoint at {}) \
+                     — send one request through Turnout first so its rate-limit \
+                     headers are recorded",
+                    config.base_url
+                ),
+                error => return Err(error.into()),
+            },
+        },
+    };
+    if json {
+        let mut value = serde_json::to_value(&quota)?;
+        value["provider"] = serde_json::Value::String(id.to_string());
+        println!("{}", serde_json::to_string(&value)?);
+        return Ok(());
+    }
+    println!("{id}  {}", quota.level.as_deref().unwrap_or("-"));
+    if let Some(credits) = quota.credits_remaining {
+        let held = quota
+            .credits_held
+            .filter(|held| *held > 0.0)
+            .map(|held| format!("  ({} held)", group_digits(held)))
+            .unwrap_or_default();
+        println!("  {:<14} {} CR{held}", "credits", group_digits(credits));
+    }
+    if let Some(left) = quota.daily_remaining_tokens {
+        println!(
+            "  {:<14} {} / {} left{}",
+            "daily tokens",
+            group_digits(left as f64),
+            quota.daily_limit_tokens.map_or("?".into(), |l| group_digits(l as f64)),
+            reset_suffix(quota.daily_reset_at.as_deref()),
+        );
+    }
+    if let Some(used) = quota.window_used_tokens {
+        let label = quota
+            .window_minutes
+            .map_or("window".to_string(), |m| format!("{m}-min window"));
+        println!(
+            "  {label:<14} {} / {} used{}",
+            group_digits(used as f64),
+            quota.window_limit_tokens.map_or("?".into(), |l| group_digits(l as f64)),
+            reset_suffix(quota.window_reset_at.as_deref()),
+        );
+    }
+    if let Some(limit) = quota.concurrency_limit {
+        println!(
+            "  {:<14} {} / {limit} in flight",
+            "concurrency",
+            quota.concurrent_requests.unwrap_or(0)
+        );
+    }
+    if let Some(left) = quota.minute_remaining_tokens {
+        println!(
+            "  {:<14} {} / {} left{}",
+            "tokens/min",
+            group_digits(left as f64),
+            quota.minute_limit_tokens.map_or("?".into(), |l| group_digits(l as f64)),
+            reset_suffix(quota.minute_reset.as_deref()),
+        );
+    }
+    if let Some(left) = quota.minute_remaining_requests {
+        println!(
+            "  {:<14} {} / {} left",
+            "requests/min",
+            group_digits(left as f64),
+            quota.minute_limit_requests.map_or("?".into(), |l| group_digits(l as f64)),
+        );
+    }
+    if quota.source.as_deref() == Some("headers") {
+        let ago = quota
+            .observed_at
+            .map(|at| {
+                let age = relay_core::quota::unix_time().saturating_sub(at) / 60;
+                format!("as of {age} min ago (last response)")
+            })
+            .unwrap_or_else(|| "from the last response".to_string());
+        println!("  {ago}");
+    }
+    Ok(())
+}
+
+/// The last rate-limit headers Turnout saw for `id`, if any.
+///
+/// A capture that cannot be read is treated as absent: the live answer and
+/// the error path are both more useful than a parse failure here.
+fn captured_quota(home: &Home, id: &str) -> Option<provider_evren::Quota> {
+    let path = relay_core::QuotaSink::new(home.quota_dir(), id).path();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let at = value["at"].as_u64()?;
+    let headers = value["headers"]
+        .as_object()?
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+        .collect();
+    Some(provider_evren::Quota::from_headers(&headers, at))
+}
+
+/// `1234567.5` → `1,234,567.5`; whole numbers lose the decimals.
+fn group_digits(value: f64) -> String {
+    let whole = value.trunc() as u64;
+    let digits = whole.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    let fraction = value - value.trunc();
+    if fraction > 0.005 {
+        out.push_str(&format!("{fraction:.2}")[1..]);
+    }
+    out
+}
+
+/// `2026-10-28T00:00:00Z` → `  (resets 2026-10-28 00:00 UTC)`.
+fn reset_suffix(at: Option<&str>) -> String {
+    let Some(at) = at else { return String::new() };
+    let utc = at.ends_with('Z') || at.ends_with("+00:00");
+    let short: String = at.replacen('T', " ", 1).chars().take(16).collect();
+    format!("  (resets {short}{})", if utc { " UTC" } else { "" })
 }
 
 /// Credential services may display an OS approval prompt. Listing connections must never
@@ -1592,11 +1745,11 @@ struct OpenAiOAuthProvider {
 
 impl OpenAiOAuthProvider {
     async fn adapter(&self) -> Result<provider_openai::OpenAiCompatible> {
-        provider_openai::OpenAiCompatible::new(
+        let adapter = provider_openai::OpenAiCompatible::new(
             self.config.clone(),
             Some(current_openai_access_token(&self.home).await?),
-        )
-        .map_err(Into::into)
+        )?;
+        Ok(adapter.with_header_sink(quota_sink(&self.home, self.config.id.as_str())))
     }
 }
 
@@ -1671,12 +1824,24 @@ fn provider_adapter(home: &Home, id: &str) -> Result<Box<dyn ProviderAdapter>> {
     let key = credential_store(home)
         .ok()
         .and_then(|store| store.get(&config.credential).ok().flatten());
+    let sink = quota_sink(home, config.id.as_str());
     Ok(match config.dialect {
-        ProtocolDialect::AnthropicMessages => {
-            Box::new(provider_anthropic::AnthropicProvider::new(config, key)?)
-        }
-        _ => Box::new(provider_openai::OpenAiCompatible::new(config, key)?),
+        ProtocolDialect::AnthropicMessages => Box::new(
+            provider_anthropic::AnthropicProvider::new(config, key)?.with_header_sink(sink),
+        ),
+        _ => Box::new(
+            provider_openai::OpenAiCompatible::new(config, key)?.with_header_sink(sink),
+        ),
     })
+}
+
+/// Every real chat request records the provider's rate-limit headers, so
+/// `providers quota` has something to show when there is no `/quota` endpoint.
+fn quota_sink(home: &Home, provider: &str) -> Option<std::sync::Arc<dyn relay_core::HeaderSink>> {
+    Some(std::sync::Arc::new(relay_core::QuotaSink::new(
+        home.quota_dir(),
+        provider,
+    )))
 }
 
 // ---------------------------------------------------------------------------

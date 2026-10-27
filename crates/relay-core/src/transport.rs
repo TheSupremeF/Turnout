@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,6 +25,8 @@ pub use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 pub struct HttpClient {
     client: reqwest::Client,
     timeout: Duration,
+    /// Receives the headers of every response, when set.
+    sink: Option<Arc<dyn crate::quota::HeaderSink>>,
 }
 
 impl Default for HttpClient {
@@ -58,7 +61,29 @@ impl HttpClient {
         let client = builder
             .build()
             .map_err(|e| RelayError::Http(e.to_string()))?;
-        Ok(HttpClient { client, timeout })
+        Ok(HttpClient {
+            client,
+            timeout,
+            sink: None,
+        })
+    }
+
+    /// Record response headers (rate limits, retry hints) through `sink`.
+    /// Chained after the constructor so no call site has to thread it through.
+    pub fn with_header_sink(
+        mut self,
+        sink: Option<Arc<dyn crate::quota::HeaderSink>>,
+    ) -> Self {
+        self.sink = sink;
+        self
+    }
+
+    /// Hand a response's headers to the sink, if one is set. Reading the
+    /// headers cannot fail the request, and the sink itself never errors.
+    fn observe(&self, response: &reqwest::Response) {
+        if let Some(sink) = &self.sink {
+            sink.record(response.headers());
+        }
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str, headers: &HeaderMap) -> Result<T> {
@@ -70,6 +95,7 @@ impl HttpClient {
             .send()
             .await
             .map_err(|e| RelayError::Http(redact_secrets(&e.to_string())))?;
+        self.observe(&response);
         decode_json(response, url).await
     }
 
@@ -88,6 +114,7 @@ impl HttpClient {
             .send()
             .await
             .map_err(|e| RelayError::Http(redact_secrets(&e.to_string())))?;
+        self.observe(&response);
         decode_json(response, url).await
     }
 
@@ -106,6 +133,8 @@ impl HttpClient {
             .send()
             .await
             .map_err(|e| RelayError::Http(redact_secrets(&e.to_string())))?;
+        // A 429 carries the same limits as a successful call, so record first.
+        self.observe(&response);
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();

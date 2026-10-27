@@ -190,6 +190,60 @@ pub struct ProviderInfo {
     pub max_concurrent: Option<u32>,
 }
 
+/// What a provider reports about its remaining budget, as
+/// `turnout providers quota <id> --json` prints it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuotaInfo {
+    pub level: Option<String>,
+    pub credits_remaining: Option<f64>,
+    pub credits_held: Option<f64>,
+    pub daily_limit_tokens: Option<u64>,
+    pub daily_remaining_tokens: Option<u64>,
+    pub daily_reset_at: Option<String>,
+    pub window_minutes: Option<u64>,
+    pub window_limit_tokens: Option<u64>,
+    pub window_used_tokens: Option<u64>,
+    pub window_reset_at: Option<String>,
+    pub concurrency_limit: Option<u64>,
+    pub concurrent_requests: Option<u64>,
+    pub minute_limit_tokens: Option<u64>,
+    pub minute_remaining_tokens: Option<u64>,
+    pub minute_reset: Option<String>,
+    pub minute_limit_requests: Option<u64>,
+    pub minute_remaining_requests: Option<u64>,
+    /// Unix seconds the figures describe; set for a headers capture.
+    pub observed_at: Option<u64>,
+    /// `"live"` from `/quota`, `"headers"` from the last recorded response.
+    pub source: Option<String>,
+}
+
+pub fn parse_quota(text: &str) -> Result<QuotaInfo, String> {
+    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let int = |key: &str| value[key].as_u64();
+    let text = |key: &str| value[key].as_str().map(str::to_string);
+    Ok(QuotaInfo {
+        level: text("level"),
+        credits_remaining: value["credits_remaining"].as_f64(),
+        credits_held: value["credits_held"].as_f64(),
+        daily_limit_tokens: int("daily_limit_tokens"),
+        daily_remaining_tokens: int("daily_remaining_tokens"),
+        daily_reset_at: text("daily_reset_at"),
+        window_minutes: int("window_minutes"),
+        window_limit_tokens: int("window_limit_tokens"),
+        window_used_tokens: int("window_used_tokens"),
+        window_reset_at: text("window_reset_at"),
+        concurrency_limit: int("concurrency_limit"),
+        concurrent_requests: int("concurrent_requests"),
+        minute_limit_tokens: int("minute_limit_tokens"),
+        minute_remaining_tokens: int("minute_remaining_tokens"),
+        minute_reset: text("minute_reset"),
+        minute_limit_requests: int("minute_limit_requests"),
+        minute_remaining_requests: int("minute_remaining_requests"),
+        observed_at: int("observed_at"),
+        source: text("source"),
+    })
+}
+
 /// One worker agent file, as `turnout agents list --json` reports it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentInfo {
@@ -348,6 +402,10 @@ impl Backend {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    pub fn quota(&self, provider: &str) -> Result<QuotaInfo, String> {
+        parse_quota(&self.args(&["providers", "quota", provider, "--json"])?)
     }
 
     pub fn agents(&self, harness: &str) -> Result<AgentsInfo, String> {

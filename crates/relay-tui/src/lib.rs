@@ -561,6 +561,68 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_quota_is_shown_in_connections() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('c'));
+        assert!(screen(&mut a, 100, 30).contains("u kota"));
+        a.apply_message(Msg::Quota(
+            "evren".into(),
+            crate::data::parse_quota(
+                r#"{"provider":"evren","level":"ok","credits_remaining":1060.0,"credits_held":0.0,
+                "daily_limit_tokens":15000000,"daily_remaining_tokens":13407136,
+                "daily_reset_at":"2026-10-28T00:00:00Z","window_minutes":5,
+                "window_limit_tokens":2500000,"window_used_tokens":118069,
+                "window_reset_at":"2026-10-27T09:55:00+00:00",
+                "concurrency_limit":32,"concurrent_requests":2}"#,
+            ),
+        ));
+        let view = screen(&mut a, 120, 34);
+        assert!(view.contains("Kalan kota — EVREN"), "{view}");
+        assert!(view.contains("1.060 CR"), "{view}");
+        assert!(view.contains("13.407.136 / 15.000.000 kaldı"), "{view}");
+        assert!(view.contains("28.10 00:00 UTC'de sıfırlanır"), "{view}");
+        assert!(view.contains("118.069 / 2.500.000 kullanıldı"), "{view}");
+        assert!(view.contains("2 / 32 istek sürüyor"), "{view}");
+        press(&mut a, KeyCode::Esc);
+        assert!(screen(&mut a, 100, 30).contains("u kota"));
+    }
+
+    #[test]
+    fn a_headers_sourced_quota_is_shown_as_the_last_response() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('c'));
+        let observed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 180;
+        a.apply_message(Msg::Quota(
+            "openai".into(),
+            crate::data::parse_quota(&format!(
+                r#"{{"provider":"openai","observed_at":{observed},"source":"headers",
+                "minute_limit_tokens":150000,"minute_remaining_tokens":149780,
+                "minute_reset":"12ms","minute_limit_requests":10000,
+                "minute_remaining_requests":9998}}"#
+            )),
+        ));
+        let view = screen(&mut a, 120, 34);
+        assert!(view.contains("dakikalık token"), "{view}");
+        assert!(view.contains("149.780 / 150.000 kaldı"), "{view}");
+        assert!(view.contains("dakikalık istek"), "{view}");
+        assert!(view.contains("9.998 / 10.000 kaldı"), "{view}");
+        assert!(view.contains("son yanıttan · 3 dk önce"), "{view}");
+    }
+
+    #[test]
+    fn a_quota_failure_returns_to_the_list() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('c'));
+        a.apply_message(Msg::Quota("openai".into(), Err("no /quota endpoint".into())));
+        assert!(matches!(a.modal, Some(Modal::Conn(_))));
+        assert!(screen(&mut a, 100, 30).contains("Kota okunamadı"));
+    }
+
+    #[test]
     fn a_provider_limit_is_shown_and_validated_in_connections() {
         let mut a = app();
         a.providers[0].max_concurrent = Some(4);

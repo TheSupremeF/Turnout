@@ -813,17 +813,76 @@ fn review_dialog(frame: &mut Frame, review: &mut Review, area: Rect) {
 
 // ---- connections --------------------------------------------------------------
 
+/// One quota line: label, value and, when `left` is known, a meter of what remains.
+fn quota_row(label: &str, value: String, left: Option<f64>, color: Color) -> Line<'static> {
+    let mut spans = vec![Span::styled(format!("  {label:<14}"), dim())];
+    match left {
+        Some(left) => {
+            let left = left.clamp(0.0, 1.0);
+            let filled = (left * 12.0).round() as usize;
+            spans.push(Span::styled(
+                "█".repeat(filled),
+                Style::default().fg(if left < 0.15 { RED } else { MINT }),
+            ));
+            spans.push(Span::styled("░".repeat(12 - filled), dim()));
+        }
+        None => spans.push(Span::raw(" ".repeat(12))),
+    }
+    spans.push(Span::styled(format!("  {value}"), Style::default().fg(color)));
+    Line::from(spans)
+}
+
+/// `13407136.0` → `13.407.136` (Turkish grouping); keeps two decimals when needed.
+fn group(value: f64) -> String {
+    let digits = (value.trunc() as u64).to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    let fraction = value - value.trunc();
+    if fraction > 0.005 {
+        out.push(',');
+        out.push_str(&format!("{fraction:.2}")[2..]);
+    }
+    out
+}
+
+/// `2026-10-28T00:00:00Z` → ` · 28.10 00:00 UTC'de sıfırlanır`.
+fn reset_note(at: Option<&str>) -> String {
+    let Some(at) = at else { return String::new() };
+    let (Some(month), Some(day), Some(time)) = (at.get(5..7), at.get(8..10), at.get(11..16)) else {
+        return String::new();
+    };
+    let utc = if at.ends_with('Z') || at.ends_with("+00:00") { " UTC" } else { "" };
+    format!(" · {day}.{month} {time}{utc}'de sıfırlanır")
+}
+
+/// Unix seconds, for the "last response" age under a captured quota.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
 fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
     let extra = match conn.mode {
         ConnMode::Custom { .. } => 5,
         // Title, two wrapped lines of explanation, input, hint or error, keys.
         ConnMode::Limit { .. } => 6,
+        // Title, up to six quota rows, a capture-age line, keys.
+        ConnMode::Quota { .. } => 9,
         _ => 0,
     };
     let rows = 7 + app.oauth.len().max(1) + app.providers.len().max(1) + 1 + extra;
+    // Quota rows carry a meter and a reset time; give them room on one line.
+    let width = if matches!(conn.mode, ConnMode::Quota { .. }) { 100 } else { 84 };
     let rect = centered(
         area,
-        84,
+        width,
         (rows as u16 + 2).min(area.height.saturating_sub(2).max(10)),
     );
     frame.render_widget(Clear, rect);
@@ -876,7 +935,10 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
     }
     for (index, provider) in app.providers.iter().enumerate() {
         let selected = index == conn.cursor
-            && matches!(conn.mode, ConnMode::List | ConnMode::ConfirmDelete(_));
+            && matches!(
+                conn.mode,
+                ConnMode::List | ConnMode::ConfirmDelete(_) | ConnMode::Quota { .. }
+            );
         let (mark, color, note) = if provider.has_key {
             ("●", MINT, "anahtar hazır")
         } else {
@@ -912,9 +974,108 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
             ("n", "yeni"),
             ("d", "kaldır"),
             ("l", "sınır"),
+            ("u", "kota"),
             ("r", "yenile"),
             ("Esc", "kapat"),
         ])),
+        ConnMode::Quota { provider, quota } => {
+            let level = quota.level.as_deref().unwrap_or("");
+            lines.push(Line::from(vec![
+                Span::styled(format!("Kalan kota — {}", provider_name(provider)), bold(ACCENT)),
+                Span::styled(
+                    if level.is_empty() { String::new() } else { format!("  {level}") },
+                    Style::default().fg(if level == "ok" { MINT } else { AMBER }),
+                ),
+            ]));
+            if let Some(credits) = quota.credits_remaining {
+                let held = quota
+                    .credits_held
+                    .filter(|held| *held > 0.0)
+                    .map(|held| format!("  ({} bloke)", group(held)))
+                    .unwrap_or_default();
+                let color = if credits <= 0.0 { RED } else { theme::TEXT };
+                lines.push(quota_row("kredi", format!("{} CR{held}", group(credits)), None, color));
+            }
+            if let Some(left) = quota.daily_remaining_tokens {
+                let limit = quota.daily_limit_tokens;
+                lines.push(quota_row(
+                    "günlük token",
+                    format!(
+                        "{} / {} kaldı{}",
+                        group(left as f64),
+                        limit.map_or("?".into(), |l| group(l as f64)),
+                        reset_note(quota.daily_reset_at.as_deref()),
+                    ),
+                    limit.filter(|l| *l > 0).map(|l| left as f64 / l as f64),
+                    theme::TEXT,
+                ));
+            }
+            if let Some(used) = quota.window_used_tokens {
+                let limit = quota.window_limit_tokens;
+                let label = quota
+                    .window_minutes
+                    .map_or("pencere".to_string(), |m| format!("{m} dk pencere"));
+                lines.push(quota_row(
+                    &label,
+                    format!(
+                        "{} / {} kullanıldı{}",
+                        group(used as f64),
+                        limit.map_or("?".into(), |l| group(l as f64)),
+                        reset_note(quota.window_reset_at.as_deref()),
+                    ),
+                    // The bar shows what is left, like the daily one.
+                    limit
+                        .filter(|l| *l > 0)
+                        .map(|l| 1.0 - (used as f64 / l as f64).min(1.0)),
+                    theme::TEXT,
+                ));
+            }
+            if let Some(limit) = quota.concurrency_limit {
+                lines.push(quota_row(
+                    "eşzamanlı",
+                    format!("{} / {limit} istek sürüyor", quota.concurrent_requests.unwrap_or(0)),
+                    None,
+                    theme::TEXT,
+                ));
+            }
+            if let Some(left) = quota.minute_remaining_tokens {
+                let limit = quota.minute_limit_tokens;
+                lines.push(quota_row(
+                    "dakikalık token",
+                    format!(
+                        "{} / {} kaldı{}",
+                        group(left as f64),
+                        limit.map_or("?".into(), |l| group(l as f64)),
+                        reset_note(quota.minute_reset.as_deref()),
+                    ),
+                    limit.filter(|l| *l > 0).map(|l| left as f64 / l as f64),
+                    theme::TEXT,
+                ));
+            }
+            if let Some(left) = quota.minute_remaining_requests {
+                lines.push(quota_row(
+                    "dakikalık istek",
+                    format!(
+                        "{} / {} kaldı",
+                        group(left as f64),
+                        quota.minute_limit_requests.map_or("?".into(), |l| group(l as f64)),
+                    ),
+                    None,
+                    theme::TEXT,
+                ));
+            }
+            if quota.source.as_deref() == Some("headers") {
+                let note = quota.observed_at.map_or_else(
+                    || "son yanıttan".to_string(),
+                    |at| {
+                        let age = unix_now().saturating_sub(at) / 60;
+                        format!("son yanıttan · {age} dk önce")
+                    },
+                );
+                lines.push(Line::from(Span::styled(note, dim())));
+            }
+            lines.push(keys(&[("r", "yenile"), ("Esc", "geri")]));
+        }
         ConnMode::Limit {
             provider,
             input,

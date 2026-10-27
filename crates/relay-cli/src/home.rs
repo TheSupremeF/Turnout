@@ -136,6 +136,10 @@ impl Home {
     pub fn vault(&self) -> PathBuf {
         self.root.join("vault.json")
     }
+    /// Captured rate-limit headers, one file per provider.
+    pub fn quota_dir(&self) -> PathBuf {
+        self.root.join("quota")
+    }
 
     /// Owner-only file holding the key that seals [`Home::vault`].
     ///
