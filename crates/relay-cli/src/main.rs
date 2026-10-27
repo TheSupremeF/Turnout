@@ -24,7 +24,7 @@ use relay_core::{
     RouteContext, Surface, TestResult, GATEWAY_TOKEN_ENV,
 };
 use relay_credentials::CredentialStore;
-use relay_gateway::{Gateway, GatewayConfig, GatewayModelRoute};
+use relay_gateway::{Gateway, GatewayConfig, GatewayModelRoute, TrafficPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -100,9 +100,17 @@ enum Cmd {
         /// non-Anthropic models after them.
         #[arg(long, conflicts_with = "profile")]
         hybrid: bool,
-        /// Do not reroute this model to the route's other models when its
-        /// provider is unreachable or rate-limited.
+        /// Let every model of the route be rerouted to the route's other
+        /// models when its provider keeps failing. Off by default.
         #[arg(long)]
+        fallback: bool,
+        /// Reroute one model only to the listed ones, in order:
+        /// `provider::model=provider::model[,provider::model...]`. Repeatable;
+        /// takes precedence over --fallback for that model.
+        #[arg(long = "fallback-chain", value_name = "FROM=TO[,TO...]")]
+        fallback_chain: Vec<String>,
+        /// Accepted for older scripts; fallback is already off by default.
+        #[arg(long, hide = true, conflicts_with = "fallback")]
         no_fallback: bool,
     },
     /// Apply the most recent plan (with backup)
@@ -206,6 +214,17 @@ enum ProvidersCmd {
     },
     Remove {
         id: String,
+    },
+    /// Show or set how many requests may run against a provider at once
+    /// (parallel agents beyond the limit wait in line instead of hitting 429s)
+    Limit {
+        id: String,
+        /// Most requests in flight at once
+        #[arg(long, conflicts_with = "clear")]
+        max_concurrent: Option<u32>,
+        /// Remove the limit
+        #[arg(long)]
+        clear: bool,
     },
 }
 
@@ -340,7 +359,9 @@ async fn run(cli: Cli) -> Result<()> {
             config,
             profile,
             hybrid,
-            no_fallback,
+            fallback,
+            fallback_chain,
+            no_fallback: _,
         } => plan_targets(
             &home,
             &harness,
@@ -349,7 +370,8 @@ async fn run(cli: Cli) -> Result<()> {
             config,
             profile.as_deref(),
             hybrid,
-            !no_fallback,
+            fallback,
+            &fallback_chain,
         ),
         Cmd::Apply { harness } => apply(&home, harness),
         Cmd::Rollback { id } => {
@@ -1132,6 +1154,8 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
                     base_url: &'a str,
                     dialect: &'a str,
                     has_key: bool,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    max_concurrent: Option<u32>,
                 }
 
                 let summaries = list
@@ -1142,6 +1166,7 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
                         base_url: &provider.base_url,
                         dialect: provider.dialect.as_str(),
                         has_key: credential_present(home, &provider.credential) == Some(true),
+                        max_concurrent: provider.max_concurrent,
                     })
                     .collect::<Vec<_>>();
                 println!("{}", serde_json::to_string(&summaries)?);
@@ -1156,8 +1181,12 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
                     Some(false) => "no key",
                     None => "key store unavailable",
                 };
+                let limit = p
+                    .max_concurrent
+                    .map(|limit| format!("  max {limit} at once"))
+                    .unwrap_or_default();
                 println!(
-                    "{:<16} {:<18} {}  [{key}]",
+                    "{:<16} {:<18} {}  [{key}]{limit}",
                     p.id,
                     p.dialect.as_str(),
                     p.base_url
@@ -1226,6 +1255,12 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
             } else {
                 println!("no key stored; re-run with --key-stdin (e.g. `pbpaste | turnout providers add {id} --key-stdin`)");
             }
+            // Re-adding (e.g. to replace the key) keeps the concurrency limit.
+            config.max_concurrent = home
+                .providers()?
+                .into_iter()
+                .find(|existing| existing.id == id)
+                .and_then(|existing| existing.max_concurrent);
             home.save_provider(config)?;
             println!("provider `{id}` saved");
             Ok(())
@@ -1240,6 +1275,39 @@ fn providers(home: &Home, cmd: ProvidersCmd) -> Result<()> {
             }
             home.remove_provider(&id)?;
             println!("removed `{id}` and its stored key");
+            Ok(())
+        }
+        ProvidersCmd::Limit {
+            id,
+            max_concurrent,
+            clear,
+        } => {
+            let id = ProviderId::new(id);
+            let Some(mut config) = home.providers()?.into_iter().find(|p| p.id == id) else {
+                bail!("no provider named `{id}`");
+            };
+            if max_concurrent.is_none() && !clear {
+                match config.max_concurrent {
+                    Some(limit) => println!("`{id}`: at most {limit} request(s) at once"),
+                    None => println!("`{id}`: no concurrency limit"),
+                }
+                return Ok(());
+            }
+            if max_concurrent == Some(0) {
+                bail!("--max-concurrent must be at least 1 (use --clear for no limit)");
+            }
+            config.max_concurrent = max_concurrent;
+            home.save_provider(config)?;
+            match max_concurrent {
+                Some(limit) => println!("`{id}`: at most {limit} request(s) at once"),
+                None => println!("`{id}`: no concurrency limit"),
+            }
+            // The Agent reads provider settings once at startup.
+            match restart_agent() {
+                Ok(true) => println!("Turnout Agent restarted with the new limit"),
+                Ok(false) => {}
+                Err(error) => eprintln!("warning: could not restart the Turnout Agent: {error}"),
+            }
             Ok(())
         }
     }
@@ -1696,6 +1764,7 @@ fn plan(
                 provider: provider.id.to_string(),
                 model: enabled.clone(),
                 public_model: enabled.clone(),
+                fallbacks: Vec::new(),
             })
             .collect(),
         true,
@@ -1716,6 +1785,45 @@ fn parse_target(value: &str) -> Result<(String, String)> {
     Ok((provider, model))
 }
 
+/// `--fallback-chain FROM=TO[,TO...]`: FROM may only be rerouted to the listed
+/// models of the same route, in that order. Each side uses `provider::model`.
+fn apply_fallback_chains(
+    mut targets: Vec<SavedTarget>,
+    chains: &[String],
+) -> Result<Vec<SavedTarget>> {
+    let public = |value: &str, targets: &[SavedTarget]| -> Result<String> {
+        let (provider, model) = parse_target(value)?;
+        targets
+            .iter()
+            .find(|target| target.provider == provider && target.model == model)
+            .map(|target| target.public_model.clone())
+            .ok_or_else(|| anyhow!("`{value}` in --fallback-chain is not a --target of this route"))
+    };
+    for chain in chains {
+        let (from, to) = chain.split_once('=').ok_or_else(|| {
+            anyhow!("invalid --fallback-chain `{chain}`; expected provider::model=provider::model[,...]")
+        })?;
+        let from = public(from.trim(), &targets)?;
+        let mut list = Vec::new();
+        for item in to.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            let candidate = public(item, &targets)?;
+            if candidate == from {
+                bail!("--fallback-chain: `{item}` cannot fall back to itself");
+            }
+            if !list.contains(&candidate) {
+                list.push(candidate);
+            }
+        }
+        if list.is_empty() {
+            bail!("--fallback-chain `{chain}` names no model to fall back to");
+        }
+        if let Some(target) = targets.iter_mut().find(|target| target.public_model == from) {
+            target.fallbacks = list;
+        }
+    }
+    Ok(targets)
+}
+
 fn plan_targets(
     home: &Home,
     harness: &str,
@@ -1725,6 +1833,7 @@ fn plan_targets(
     profile: Option<&str>,
     hybrid: bool,
     fallback: bool,
+    fallback_chains: &[String],
 ) -> Result<()> {
     let mut pairs = Vec::new();
     for value in values {
@@ -1791,6 +1900,7 @@ fn plan_targets(
                 provider: provider.clone(),
                 model: model.clone(),
                 public_model: model.clone(),
+                fallbacks: Vec::new(),
             })
             .collect::<Vec<_>>();
         home.save_profile(
@@ -1814,6 +1924,9 @@ fn plan_targets(
             harness
         );
         return Ok(());
+    }
+    if native_oauth_provider.is_some() && (fallback || !fallback_chains.is_empty()) {
+        eprintln!("note: fallback is ignored; an official sign-in route talks to its provider directly");
     }
     if let Some(provider) = native_oauth_provider {
         return plan_native_oauth(home, harness, provider, &pairs, &default_pair, config);
@@ -1868,13 +1981,16 @@ fn plan_targets(
             provider: official_provider.to_string(),
             model: slug.clone(),
             public_model: slug.clone(),
+            fallbacks: Vec::new(),
         })
         .chain(pairs.iter().map(|(provider, model)| SavedTarget {
             provider: provider.clone(),
             model: model.clone(),
             public_model: public_model(provider, model),
+            fallbacks: Vec::new(),
         }))
         .collect::<Vec<_>>();
+    let targets = apply_fallback_chains(targets, fallback_chains)?;
     let models = targets
         .iter()
         .map(|target| target.public_model.clone())
@@ -2046,6 +2162,7 @@ fn plan_native_oauth(
             provider: provider.clone(),
             model: model.clone(),
             public_model: model.clone(),
+            fallbacks: Vec::new(),
         })
         .collect();
     home.save_plan(&plan, false, targets, false)?;
@@ -2304,6 +2421,11 @@ fn apply(home: &Home, harness: Option<String>) -> Result<()> {
 /// `false` when there is no agent, so callers know the route only becomes
 /// active on the next `turnout gateway serve`.
 fn restart_agent() -> Result<bool> {
+    // The installed Agent serves the default data directory. A command run
+    // against another one (`TURNOUT_HOME`, as the tests do) must not restart it.
+    if std::env::var_os("TURNOUT_HOME").is_some() || std::env::var_os("RELAY_HOME").is_some() {
+        return Ok(false);
+    }
     if cfg!(target_os = "macos") {
         let path = agent_file()?;
         if !path.exists() {
@@ -2419,12 +2541,25 @@ fn free_gateway_port(base: u16) -> u16 {
         .unwrap_or(base + 10)
 }
 
+/// One policy for every gateway this process runs, so each provider's
+/// `max_concurrent` is a single limit across harnesses.
+fn traffic_policy(home: &Home) -> Result<TrafficPolicy> {
+    Ok(TrafficPolicy::default().with_limits(home.providers()?.into_iter().filter_map(
+        |provider| {
+            provider
+                .max_concurrent
+                .map(|limit| (provider.id.to_string(), limit as usize))
+        },
+    )))
+}
+
 fn gateway_config(
     home: &Home,
     harness: &str,
     route: &SavedRoute,
     token: String,
     port: u16,
+    traffic: TrafficPolicy,
 ) -> Result<GatewayConfig> {
     let targets = route.enabled_targets();
     let default_target = targets
@@ -2465,30 +2600,43 @@ fn gateway_config(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    // Fallback chain: every other model of the same route, in route order.
-    // A rate-limited or unreachable provider hands the request to the next one
-    // instead of failing the harness outright.
-    let model_routes = if route.fallback && model_routes.len() > 1 {
-        let alternatives = model_routes.clone();
-        model_routes
-            .into_iter()
-            .map(|route| GatewayModelRoute {
-                fallbacks: alternatives
-                    .iter()
-                    .filter(|other| other.public_model != route.public_model)
-                    .map(|other| GatewayModelRoute {
-                        public_model: other.public_model.clone(),
-                        upstream_model: other.upstream_model.clone(),
-                        upstream: other.upstream.clone(),
-                        fallbacks: Vec::new(),
-                    })
-                    .collect(),
-                ..route
-            })
-            .collect()
-    } else {
-        model_routes
+    // Fallbacks: a target's own `--fallback-chain` wins; otherwise the
+    // route-wide switch offers every other model of the route, in route order;
+    // otherwise none, and a failing model stays failed.
+    let strip = |route: &GatewayModelRoute| GatewayModelRoute {
+        fallbacks: Vec::new(),
+        ..route.clone()
     };
+    let model_routes = model_routes
+        .iter()
+        .zip(&targets)
+        .map(|(primary, target)| {
+            let fallbacks = if !target.fallbacks.is_empty() {
+                target
+                    .fallbacks
+                    .iter()
+                    .filter_map(|public| {
+                        model_routes
+                            .iter()
+                            .find(|candidate| &candidate.public_model == public)
+                    })
+                    .map(strip)
+                    .collect()
+            } else if route.fallback {
+                model_routes
+                    .iter()
+                    .filter(|other| other.public_model != primary.public_model)
+                    .map(strip)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            GatewayModelRoute {
+                fallbacks,
+                ..primary.clone()
+            }
+        })
+        .collect::<Vec<_>>();
     let allowed_models = targets
         .iter()
         .map(|target| target.public_model.clone())
@@ -2506,6 +2654,7 @@ fn gateway_config(
         anthropic_passthrough: (route.hybrid && harness == HarnessId::CLAUDE_CODE)
             .then(|| "https://api.anthropic.com".to_string()),
         request_log: harness_log(home, harness),
+        traffic,
     })
 }
 
@@ -2513,6 +2662,7 @@ async fn serve_gateways(home: &Home, only: Option<&str>) -> Result<()> {
     let only = only.map(canonical_harness).transpose()?;
     let state = home.state()?;
     let token = gateway_token(home)?;
+    let traffic = traffic_policy(home)?;
     let mut handles = Vec::new();
 
     for (harness, route) in &state.routes {
@@ -2521,7 +2671,14 @@ async fn serve_gateways(home: &Home, only: Option<&str>) -> Result<()> {
         }
         let models = route.enabled_models();
         let port = gateway_port(state.gateway_port, harness);
-        let handle = Gateway::start(gateway_config(home, harness, route, token.clone(), port)?)
+        let handle = Gateway::start(gateway_config(
+            home,
+            harness,
+            route,
+            token.clone(),
+            port,
+            traffic.clone(),
+        )?)
             .await
             .with_context(|| format!("cannot start {harness} gateway on 127.0.0.1:{port}"))?;
         eprintln!(
@@ -2960,7 +3117,14 @@ async fn launch(
         };
         let gateway_url = format!("http://127.0.0.1:{port}");
         if !running {
-            let handle = Gateway::start(gateway_config(home, harness, &route, token.clone(), port)?)
+            let handle = Gateway::start(gateway_config(
+                home,
+                harness,
+                &route,
+                token.clone(),
+                port,
+                traffic_policy(home)?,
+            )?)
                 .await
                 .context("cannot start the gateway")?;
             eprintln!("turnout: temporary gateway on {}", handle.url());

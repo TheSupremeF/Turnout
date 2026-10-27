@@ -24,6 +24,8 @@ pub struct RequestMeter {
     output_tokens: u64,
     fell_back: bool,
     first_frame: Option<Instant>,
+    retries: u32,
+    queued: std::time::Duration,
 }
 
 impl RequestMeter {
@@ -43,6 +45,8 @@ impl RequestMeter {
             output_tokens: 0,
             fell_back: false,
             first_frame: None,
+            retries: 0,
+            queued: std::time::Duration::ZERO,
         })
     }
 
@@ -51,6 +55,16 @@ impl RequestMeter {
         self.provider = provider.to_string();
         self.upstream_model = upstream_model.to_string();
         self.fell_back = fell_back;
+    }
+
+    /// One more attempt on the same model after a retryable failure.
+    pub fn retried(&mut self) {
+        self.retries += 1;
+    }
+
+    /// Time spent waiting for a free provider slot (summed over attempts).
+    pub fn queued(&mut self, waited: std::time::Duration) {
+        self.queued += waited;
     }
 
     pub fn usage(&mut self, input: u64, output: u64) {
@@ -83,6 +97,8 @@ impl RequestMeter {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "fallback": self.fell_back,
+            "retries": self.retries,
+            "queued_ms": self.queued.as_millis() as u64,
             "error": error.map(redact_secrets),
         });
         self.drop_oldest_lines();

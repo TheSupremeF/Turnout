@@ -115,9 +115,10 @@ function normalizeRoute(route) {
     }
   }
 
-  // Rerouting a model to the route's other models on rate-limit/outage is on
-  // unless the user turns it off; it never leaves the Turnout gateway.
-  const fallback = route.fallback !== false;
+  // Rerouting a model to the route's other models on rate-limit/outage is off
+  // unless the user turns it on: a request for one model must not be answered
+  // by another without asking. It never leaves the Turnout gateway.
+  const fallback = route.fallback === true;
 
   return { harness, targets, defaultTarget, surface, hybrid, fallback };
 }
@@ -379,7 +380,7 @@ export async function bridgeHandler(request, response, options = {}) {
       // mutates the VS Code extension's shared config.
       const profile = `gui-${route.harness}`;
       args.push("--profile", profile);
-      if (!route.fallback) args.push("--no-fallback");
+      if (route.fallback) args.push("--fallback");
       const saved = await execFileAsync(turnout, args, { maxBuffer: 2_000_000 });
       sendJson(response, 200, {
         ok: true,
@@ -397,7 +398,7 @@ export async function bridgeHandler(request, response, options = {}) {
     }
 
     if (route.hybrid) args.push("--hybrid");
-    if (!route.fallback) args.push("--no-fallback");
+    if (route.fallback) args.push("--fallback");
     await execFileAsync(turnout, args, { maxBuffer: 2_000_000 });
     const applied = await execFileAsync(
       turnout,

@@ -129,6 +129,10 @@ pub struct ProviderConfig {
     pub models_path: Option<String>,
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
+    /// Most requests the gateway sends to this provider at once; more wait in
+    /// line. `None` is unlimited. Matters when several agents share one key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
 }
 
 impl ProviderConfig {
@@ -146,6 +150,7 @@ impl ProviderConfig {
             default_headers: BTreeMap::new(),
             models_path: None,
             extra: BTreeMap::new(),
+            max_concurrent: None,
         }
     }
 

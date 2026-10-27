@@ -440,3 +440,86 @@ fn rollback_rejects_a_backup_id_that_leaves_the_backups_directory() {
         assert!(out.contains("backup not found"), "{out}");
     }
 }
+
+#[test]
+fn parallel_agent_settings_limits_and_explicit_fallback_chains() {
+    let env = Env::new();
+    let (ok, out) = env.run(
+        &["providers", "add", "evren", "--base-url", "https://api.example.test/v1"],
+        None,
+    );
+    assert!(ok, "{out}");
+
+    // A concurrency limit is stored, shown, kept across a re-add and cleared.
+    let (ok, out) = env.run(&["providers", "limit", "evren", "--max-concurrent", "3"], None);
+    assert!(ok && out.contains("at most 3"), "{out}");
+    let (ok, out) = env.run(
+        &["providers", "add", "evren", "--base-url", "https://api.example.test/v1"],
+        None,
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = env.run(&["providers", "list", "--json"], None);
+    assert!(ok && out.contains("\"max_concurrent\":3"), "{out}");
+    let (ok, out) = env.run(&["providers", "limit", "evren", "--max-concurrent", "0"], None);
+    assert!(!ok && out.contains("at least 1"), "{out}");
+    let (ok, out) = env.run(&["providers", "limit", "evren", "--clear"], None);
+    assert!(ok && out.contains("no concurrency limit"), "{out}");
+
+    // Fallback is off unless asked for; a chain names exactly where one model
+    // may go. Saved as a launch-only profile so no harness config is touched.
+    let plan = |extra: &[&str]| {
+        let mut args = vec![
+            "plan-targets",
+            "claude-code",
+            "--target",
+            "evren::deepseek-v4.1-flash",
+            "--target",
+            "evren::glm-5.3",
+            "--target",
+            "evren::mimo-v2.6-pro",
+            "--default-target",
+            "evren::deepseek-v4.1-flash",
+            "--profile",
+            "workers",
+        ];
+        args.extend_from_slice(extra);
+        env.run(&args, None)
+    };
+    let saved_route = || {
+        let (_, out) = env.run(&["profiles", "--json"], None);
+        let profiles: serde_json::Value = serde_json::from_str(&out).unwrap();
+        profiles["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["harness"] == "claude-code")
+            .and_then(|h| h["profiles"].as_array())
+            .and_then(|p| p.iter().find(|p| p["name"] == "workers"))
+            .map(|p| p["route"].clone())
+            .expect("profile saved")
+    };
+    let (ok, out) = plan(&[]);
+    assert!(ok, "{out}");
+    let route = saved_route();
+    assert_ne!(route["fallback"], serde_json::json!(true), "{route}");
+    assert!(route["targets"][0].get("fallbacks").is_none(), "{route}");
+
+    let (ok, out) = plan(&[
+        "--fallback-chain",
+        "evren::deepseek-v4.1-flash=evren::glm-5.3",
+    ]);
+    assert!(ok, "{out}");
+    let route = saved_route();
+    assert_eq!(route["targets"][0]["model"], "deepseek-v4.1-flash", "{route}");
+    assert_eq!(route["targets"][0]["fallbacks"], serde_json::json!(["glm-5.3"]), "{route}");
+    assert!(route["targets"][1].get("fallbacks").is_none(), "{route}");
+
+    // A chain may only point at models of the same route, and not at itself.
+    let (ok, out) = plan(&["--fallback-chain", "evren::deepseek-v4.1-flash=openai::gpt-6.1-sol"]);
+    assert!(!ok && out.contains("not a --target of this route"), "{out}");
+    let (ok, out) = plan(&[
+        "--fallback-chain",
+        "evren::deepseek-v4.1-flash=evren::deepseek-v4.1-flash",
+    ]);
+    assert!(!ok && out.contains("cannot fall back to itself"), "{out}");
+}

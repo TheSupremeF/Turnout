@@ -12,6 +12,8 @@
 pub mod convert;
 mod request_log;
 mod server;
+mod traffic;
 
 pub use request_log::{requests_dir, RequestMeter};
 pub use server::{Gateway, GatewayConfig, GatewayHandle, GatewayModelRoute, MAX_BODY_BYTES};
+pub use traffic::TrafficPolicy;

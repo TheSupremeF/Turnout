@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use provider_openai::OpenAiCompatible;
 use relay_core::{ProviderAdapter, ProviderConfig};
-use relay_gateway::{Gateway, GatewayConfig, GatewayHandle, GatewayModelRoute};
+use relay_gateway::{Gateway, GatewayConfig, GatewayHandle, GatewayModelRoute, TrafficPolicy};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -109,6 +109,7 @@ async fn gateway_with_route(
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -170,6 +171,7 @@ async fn provider_aware_routes_select_the_right_upstream_and_model() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -485,6 +487,7 @@ async fn hybrid_gateway() -> (
         port: 0,
         anthropic_passthrough: Some(format!("http://127.0.0.1:{native_port}")),
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -656,6 +659,7 @@ async fn a_rate_limited_route_falls_back_to_its_next_model() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -672,7 +676,9 @@ async fn a_rate_limited_route_falls_back_to_its_next_model() {
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["model"], "glm-5.3");
-    assert_eq!(limited_seen.lock().unwrap().len(), 1);
+    // The requested model is retried first (1 + default retries), and only
+    // then does the configured fallback serve it.
+    assert_eq!(limited_seen.lock().unwrap().len(), 3);
     assert_eq!(healthy_seen.lock().unwrap().len(), 1);
     assert!(healthy_seen.lock().unwrap()[0].contains("mimo-v2.6-pro"));
     handle.shutdown().await;
@@ -716,6 +722,7 @@ async fn a_streaming_route_falls_back_before_the_first_frame() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -772,6 +779,7 @@ async fn a_bad_request_is_not_retried_and_keeps_its_status() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -807,6 +815,7 @@ async fn every_served_request_leaves_one_usage_line() {
         port: 0,
         anthropic_passthrough: None,
         request_log: Some(log.clone()),
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -856,6 +865,7 @@ async fn a_request_body_cannot_choose_where_the_gateway_sends_it() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -903,6 +913,7 @@ async fn a_model_outside_the_route_never_reaches_an_upstream() {
         port: 0,
         anthropic_passthrough: None,
         request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
     })
     .await
     .unwrap();
@@ -957,4 +968,99 @@ async fn an_oversized_body_is_rejected_before_any_upstream_call() {
     }
     assert!(seen.lock().unwrap().is_empty());
     gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_a_configured_fallback_a_rate_limit_never_changes_the_model() {
+    let (limited_port, limited_seen) = rate_limited_upstream().await;
+    let (healthy_port, healthy_seen) = upstream().await;
+    let limited: Arc<dyn ProviderAdapter> = Arc::new(
+        OpenAiCompatible::new(
+            ProviderConfig::openai_compatible(
+                "limited",
+                format!("http://127.0.0.1:{limited_port}/v1"),
+            ),
+            Some("key-limited".into()),
+        )
+        .unwrap(),
+    );
+    let healthy: Arc<dyn ProviderAdapter> = Arc::new(
+        OpenAiCompatible::new(
+            ProviderConfig::openai_compatible(
+                "healthy",
+                format!("http://127.0.0.1:{healthy_port}/v1"),
+            ),
+            Some("key-healthy".into()),
+        )
+        .unwrap(),
+    );
+    // Both models are in the route, but neither names the other as fallback.
+    let handle = Gateway::start(GatewayConfig {
+        upstream: limited.clone(),
+        model_routes: vec![
+            GatewayModelRoute::new("deepseek", "deepseek-v4.1-flash", limited),
+            GatewayModelRoute::new("gpt", "gpt-6.1-sol", healthy),
+        ],
+        token: TOKEN.into(),
+        model_override: None,
+        allowed_models: vec!["deepseek".into(), "gpt".into()],
+        port: 0,
+        anthropic_passthrough: None,
+        request_log: None,
+        traffic: TrafficPolicy::default().without_delays(),
+    })
+    .await
+    .unwrap();
+    let response = post(
+        &handle,
+        "/v1/chat/completions",
+        json!({"model": "deepseek", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .send()
+    .await
+    .unwrap();
+    // The provider's own status reaches the client after bounded retries.
+    assert_eq!(response.status(), 429);
+    assert_eq!(limited_seen.lock().unwrap().len(), 3);
+    assert!(healthy_seen.lock().unwrap().is_empty());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn parallel_requests_share_a_provider_limit_and_all_complete() {
+    let (port, seen) = upstream().await;
+    let provider: Arc<dyn ProviderAdapter> = Arc::new(
+        OpenAiCompatible::new(
+            ProviderConfig::openai_compatible("evren", format!("http://127.0.0.1:{port}/v1")),
+            Some("upstream-key".into()),
+        )
+        .unwrap(),
+    );
+    let handle = Gateway::start(GatewayConfig {
+        upstream: provider,
+        model_routes: Vec::new(),
+        token: TOKEN.into(),
+        model_override: None,
+        allowed_models: Vec::new(),
+        port: 0,
+        anthropic_passthrough: None,
+        request_log: None,
+        traffic: TrafficPolicy::default().with_limits([("evren".to_string(), 1)]),
+    })
+    .await
+    .unwrap();
+    let requests = (0..4).map(|_| {
+        post(
+            &handle,
+            "/v1/chat/completions",
+            json!({"model": "deepseek", "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .send()
+    });
+    // One slot: the four requests queue behind each other instead of failing.
+    for response in futures::future::join_all(requests).await {
+        assert_eq!(response.unwrap().status(), 200);
+    }
+    assert_eq!(seen.lock().unwrap().len(), 4);
+    handle.shutdown().await;
 }

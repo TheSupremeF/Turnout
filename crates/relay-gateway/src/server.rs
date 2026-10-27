@@ -15,12 +15,16 @@ use futures::StreamExt;
 use rand::RngCore;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
 use tokio::task::JoinHandle;
 
-use relay_core::{redact_secrets, Model, ProviderAdapter, RelayError, Result, StreamEvent};
+use relay_core::provider::EventStream;
+use relay_core::{
+    redact_secrets, ChatResponse, Model, ProviderAdapter, RelayError, Result, StreamEvent,
+};
 
 use crate::request_log::RequestMeter;
+use crate::traffic::TrafficPolicy;
 use crate::convert::{
     anthropic_to_chat, chat_to_anthropic, chat_to_openai, chat_to_responses, openai_to_chat,
     responses_to_chat, AnthropicEncoder, OpenAiEncoder, ResponsesEncoder, StreamEncoder,
@@ -60,6 +64,9 @@ pub struct GatewayConfig {
     /// JSONL file this gateway appends one line per completed request to.
     /// `None` disables request logging (tests, one-shot launches).
     pub request_log: Option<std::path::PathBuf>,
+    /// Per-provider concurrency and same-model retries. Share one policy
+    /// between the gateways of a process so each provider has one limit.
+    pub traffic: TrafficPolicy,
 }
 
 #[derive(Clone)]
@@ -67,9 +74,9 @@ pub struct GatewayModelRoute {
     pub public_model: String,
     pub upstream_model: String,
     pub upstream: Arc<dyn ProviderAdapter>,
-    /// Tried in order when the primary upstream fails before producing any
-    /// output: an overloaded or rate-limited provider falls back to a model
-    /// that is already part of this route.
+    /// Tried in order once the primary upstream has failed (after its own
+    /// retries) before producing any output. Empty means the request never
+    /// leaves the model the client asked for.
     pub fallbacks: Vec<GatewayModelRoute>,
 }
 
@@ -493,10 +500,18 @@ async fn handle_chat(
                 .collect()
         })
         .unwrap_or_default();
-    let response_model = if model_route.is_some() {
-        requested.to_string()
+    // The client sees the model id it asked for, not the upstream one, when a
+    // provider-aware route served it.
+    let response_model = model_route.is_some().then(|| requested.to_string());
+    // Attempts in order: the requested model, then its configured fallbacks.
+    // Without model routes there is one attempt on the default upstream.
+    let attempts: Vec<(&Arc<dyn ProviderAdapter>, Option<&str>)> = if chain.is_empty() {
+        vec![(&config.upstream, None)]
     } else {
-        String::new()
+        chain
+            .iter()
+            .map(|route| (&route.upstream, Some(route.upstream_model.as_str())))
+            .collect()
     };
     let build = |upstream: &Arc<dyn ProviderAdapter>, upstream_model: Option<&str>| {
         let dialect_upstream = upstream.dialect();
@@ -513,67 +528,64 @@ async fn handle_chat(
         requested,
         value.get("stream").and_then(Value::as_bool).unwrap_or(false),
     );
-
-    if chain.is_empty() {
-        let request = match build(&config.upstream, None) {
-            Ok(request) => request,
-            Err(e) => {
-                if let Some(meter) = meter.take() {
-                    meter.finish(Some(&e.to_string()));
-                }
-                return upstream_error(dialect, e);
-            }
-        };
-        if let Some(meter) = meter.as_mut() {
-            meter.served_by(config.upstream.id().as_str(), &request.model, false);
-        }
-        return serve(&*config.upstream, request, dialect, None, meter).await;
-    }
-
-    let mut attempts = chain.into_iter().enumerate();
+    let traffic = &config.traffic;
     let mut last_error = None;
-    while let Some((index, route)) = attempts.next() {
-        let request = match build(&route.upstream, Some(&route.upstream_model)) {
+
+    for (index, (upstream, upstream_model)) in attempts.into_iter().enumerate() {
+        let request = match build(upstream, upstream_model) {
             Ok(request) => request,
-            Err(e) => {
-                if index == 0 {
-                    if let Some(meter) = meter.take() {
-                        meter.finish(Some(&e.to_string()));
-                    }
-                    return upstream_error(dialect, e);
+            Err(error) if index == 0 => {
+                if let Some(meter) = meter.take() {
+                    meter.finish(Some(&error.to_string()));
                 }
-                last_error = Some(e);
+                return upstream_error(dialect, error);
+            }
+            Err(error) => {
+                last_error = Some(error);
                 continue;
             }
         };
+        let provider = upstream.id().as_str().to_string();
         if let Some(meter) = meter.as_mut() {
-            meter.served_by(
-                route.upstream.id().as_str(),
-                &route.upstream_model,
-                index > 0,
-            );
+            meter.served_by(&provider, &request.model, index > 0);
         }
-        if !request.stream {
-            match route.upstream.chat(request).await {
-                Ok(mut response) => {
+        // Same model first: a rate limit or an overloaded provider is usually
+        // over in seconds, and switching models changes the answer.
+        for attempt in 0..=traffic.retries {
+            if attempt > 0 {
+                tokio::time::sleep(traffic.backoff(attempt)).await;
+                if let Some(meter) = meter.as_mut() {
+                    meter.retried();
+                }
+            }
+            let waiting = Instant::now();
+            let permit = match traffic.acquire(&provider).await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    // Already waited the full queue timeout; retrying the same
+                    // provider would only wait again.
+                    last_error = Some(error);
+                    break;
+                }
+            };
+            if let Some(meter) = meter.as_mut() {
+                meter.queued(waiting.elapsed());
+            }
+            let outcome = if request.stream {
+                upstream.stream(request.clone()).await.map(Served::Stream)
+            } else {
+                upstream.chat(request.clone()).await.map(Served::Whole)
+            };
+            match outcome {
+                Ok(served) => {
                     if index > 0 {
-                        note_fallback(requested, route);
+                        note_fallback(requested, &provider, &request.model);
                     }
-                    if let Some(mut meter) = meter.take() {
-                        meter.usage(response.usage.input_tokens, response.usage.output_tokens);
-                        meter.finish(None);
-                    }
-                    response.model = response_model.clone();
-                    return axum::Json(match dialect {
-                        Dialect::Anthropic => chat_to_anthropic(&response),
-                        Dialect::OpenAi => chat_to_openai(&response),
-                        Dialect::Responses => chat_to_responses(&response),
-                    })
-                    .into_response();
+                    return deliver(served, dialect, response_model, &request.model, meter, permit);
                 }
                 Err(error) if retryable(&error) => {
-                    note_retry(requested, route, &error);
-                    last_error = Some(error)
+                    note_retry(requested, &provider, &request.model, &error);
+                    last_error = Some(error);
                 }
                 Err(error) => {
                     if let Some(meter) = meter.take() {
@@ -581,25 +593,6 @@ async fn handle_chat(
                     }
                     return upstream_error(dialect, error);
                 }
-            }
-            continue;
-        }
-        match route.upstream.stream(request).await {
-            Ok(events) => {
-                if index > 0 {
-                    note_fallback(requested, route);
-                }
-                return sse_response(events, encoder_for(dialect, response_model.clone()), meter);
-            }
-            Err(error) if retryable(&error) => {
-                note_retry(requested, route, &error);
-                last_error = Some(error)
-            }
-            Err(error) => {
-                if let Some(meter) = meter.take() {
-                    meter.finish(Some(&error.to_string()));
-                }
-                return upstream_error(dialect, error);
             }
         }
     }
@@ -616,25 +609,60 @@ async fn handle_chat(
     }
 }
 
-/// One line in the Agent log, so a silent reroute is still visible afterwards.
-fn note_fallback(requested: &str, route: &GatewayModelRoute) {
-    eprintln!(
-        "turnout-agent: `{requested}` served by fallback {}:{}",
-        route.upstream.id(),
-        route.upstream_model
-    );
+/// What an upstream returned for one attempt.
+enum Served {
+    Whole(ChatResponse),
+    Stream(EventStream),
 }
 
-fn note_retry(requested: &str, route: &GatewayModelRoute, error: &RelayError) {
+/// Turn a successful upstream reply into the client's dialect. The provider
+/// slot (`permit`) stays taken until the reply, including a whole stream, is
+/// delivered.
+fn deliver(
+    served: Served,
+    dialect: Dialect,
+    response_model: Option<String>,
+    upstream_model: &str,
+    mut meter: Option<RequestMeter>,
+    permit: Option<OwnedSemaphorePermit>,
+) -> Response {
+    match served {
+        Served::Whole(mut response) => {
+            if let Some(model) = response_model {
+                response.model = model;
+            }
+            if let Some(mut meter) = meter.take() {
+                meter.usage(response.usage.input_tokens, response.usage.output_tokens);
+                meter.finish(None);
+            }
+            drop(permit);
+            axum::Json(match dialect {
+                Dialect::Anthropic => chat_to_anthropic(&response),
+                Dialect::OpenAi => chat_to_openai(&response),
+                Dialect::Responses => chat_to_responses(&response),
+            })
+            .into_response()
+        }
+        Served::Stream(events) => {
+            let model = response_model.unwrap_or_else(|| upstream_model.to_string());
+            sse_response(events, encoder_for(dialect, model), meter, permit)
+        }
+    }
+}
+
+/// One line in the Agent log, so a reroute is still visible afterwards.
+fn note_fallback(requested: &str, provider: &str, upstream_model: &str) {
+    eprintln!("turnout-agent: `{requested}` served by fallback {provider}:{upstream_model}");
+}
+
+fn note_retry(requested: &str, provider: &str, upstream_model: &str, error: &RelayError) {
     eprintln!(
-        "turnout-agent: `{requested}` failed on {}:{} ({}), trying next",
-        route.upstream.id(),
-        route.upstream_model,
+        "turnout-agent: `{requested}` failed on {provider}:{upstream_model} ({})",
         redact_secrets(&error.to_string())
     );
 }
-/// Only a failure the next provider could plausibly fix is retried; a bad
-/// request (400) or an auth mistake would fail everywhere the same way.
+/// Only a failure that waiting or another provider could plausibly fix is
+/// retried; a bad request (400) or an auth mistake would fail the same way.
 fn retryable(error: &RelayError) -> bool {
     match error {
         RelayError::Http(_) => true,
@@ -653,58 +681,17 @@ fn encoder_for(dialect: Dialect, response_model: String) -> Box<dyn StreamEncode
     }
 }
 
-/// One upstream, no fallback chain: the single-model gateway path.
-async fn serve(
-    upstream: &dyn ProviderAdapter,
-    request: relay_core::ChatRequest,
-    dialect: Dialect,
-    response_model: Option<String>,
-    mut meter: Option<RequestMeter>,
-) -> Response {
-    if !request.stream {
-        return match upstream.chat(request).await {
-            Ok(mut response) => {
-                if let Some(model) = response_model {
-                    response.model = model;
-                }
-                if let Some(mut meter) = meter.take() {
-                    meter.usage(response.usage.input_tokens, response.usage.output_tokens);
-                    meter.finish(None);
-                }
-                axum::Json(match dialect {
-                    Dialect::Anthropic => chat_to_anthropic(&response),
-                    Dialect::OpenAi => chat_to_openai(&response),
-                    Dialect::Responses => chat_to_responses(&response),
-                })
-                .into_response()
-            }
-            Err(e) => {
-                if let Some(meter) = meter.take() {
-                    meter.finish(Some(&e.to_string()));
-                }
-                upstream_error(dialect, e)
-            }
-        };
-    }
-    let model = response_model.unwrap_or_else(|| request.model.clone());
-    match upstream.stream(request).await {
-        Ok(events) => sse_response(events, encoder_for(dialect, model), meter),
-        Err(e) => {
-            if let Some(meter) = meter.take() {
-                meter.finish(Some(&e.to_string()));
-            }
-            upstream_error(dialect, e)
-        }
-    }
-}
-
 fn sse_response(
-    mut events: relay_core::provider::EventStream,
+    mut events: EventStream,
     mut encoder: Box<dyn StreamEncoder>,
     mut meter: Option<RequestMeter>,
+    permit: Option<OwnedSemaphorePermit>,
 ) -> Response {
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     tokio::spawn(async move {
+        // Held until this task ends: the provider slot is busy for as long as
+        // the stream is, and is freed even when the client disconnects.
+        let _permit = permit;
         macro_rules! send_all {
             ($frames:expr) => {
                 for frame in $frames {

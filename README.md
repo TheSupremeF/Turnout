@@ -95,6 +95,37 @@ OS credential service), `vault` (Argon2id passphrase via `TURNOUT_VAULT_PASSWORD
 Upgrading from a build that used the plain file encrypts the keys on first run
 and renames the old file to `credentials.json.imported`.
 
+## Parallel agents
+
+Several coding agents can share one provider through the gateway, for example
+Opus in Claude Code handing work to three DeepSeek subagents. Three things keep
+that predictable:
+
+- **No silent model switch.** A request for a model is answered by that model
+  or fails with the provider's status. Rerouting is opt-in, either for the
+  whole route (`--fallback`) or per model, naming exactly where it may go:
+
+  ```sh
+  turnout plan-targets claude-code --hybrid \
+    --target evren::deepseek-v4.1-flash --target evren::glm-5.3 \
+    --default-target evren::deepseek-v4.1-flash \
+    --fallback-chain evren::deepseek-v4.1-flash=evren::glm-5.3
+  ```
+
+- **Retries before anything else.** A rate limit (429), an overloaded or
+  unreachable provider is retried on the same model twice, with exponential
+  backoff (1 s, 2 s, capped at 8 s) and jitter so agents that failed together
+  do not retry together. Only then is a configured fallback tried. Once a
+  response has started streaming it is never retried.
+- **A per-provider limit.** `turnout providers limit evren --max-concurrent 4`
+  lets four requests run at once; the rest wait in line (up to two minutes)
+  instead of tripping the provider's rate limit. The limit covers every
+  harness the Agent serves, because provider quotas are per account.
+
+Each line in the request log (`requests/<harness>.jsonl` in the data
+directory) records the model that was asked for, the one that answered,
+`fallback`, `retries` and `queued_ms`.
+
 ## Logo
 
 `icon.svg` is the source artwork. It styles itself with CSS classes and a

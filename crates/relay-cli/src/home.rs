@@ -14,6 +14,10 @@ pub struct SavedTarget {
     pub model: String,
     /// Model id exposed to the harness. Namespaced when a route spans providers.
     pub public_model: String,
+    /// Public model ids this target may be rerouted to, in order, when its
+    /// provider keeps failing. Overrides the route-wide `fallback` switch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,17 +37,10 @@ pub struct SavedRoute {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hybrid: bool,
     /// Let the gateway reroute a target to the route's other models when its
-    /// provider is unreachable or rate-limited. On unless explicitly disabled.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    /// provider keeps failing. Off unless explicitly enabled: a request for one
+    /// model must not be answered by another without the user asking for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fallback: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn is_true(value: &bool) -> bool {
-    *value
 }
 
 impl SavedRoute {
@@ -63,6 +60,7 @@ impl SavedRoute {
                     provider: self.provider.clone(),
                     public_model: model.clone(),
                     model,
+                    fallbacks: Vec::new(),
                 })
                 .collect()
         } else {
@@ -100,7 +98,7 @@ struct SavedPlan {
     #[serde(default)]
     targets: Vec<SavedTarget>,
     /// Whether the gateway may reroute a model to the route's other models.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     fallback: bool,
     plan: ChangePlan,
 }
@@ -357,18 +355,23 @@ mod fallback_tests {
     use super::*;
 
     #[test]
-    fn an_older_state_file_gets_fallback_by_default() {
-        // Routes saved before fallback existed keep working, and rerouting is
-        // the safer default: an outage should not kill the harness.
+    fn a_route_never_falls_back_unless_asked() {
+        // A request for one model must not be answered by another silently:
+        // routes saved without the field (including older ones) stay strict.
         let route: SavedRoute = serde_json::from_str(
             r#"{"provider":"openai","model":"gpt-6.1-sol","models":[],"via_gateway":true}"#,
         )
         .unwrap();
-        assert!(route.fallback);
+        assert!(!route.fallback);
+        let opted_in: SavedRoute = serde_json::from_str(
+            r#"{"provider":"openai","model":"gpt-6.1-sol","models":[],"via_gateway":true,"fallback":true}"#,
+        )
+        .unwrap();
+        assert!(opted_in.fallback);
     }
 
     #[test]
-    fn fallback_can_be_turned_off_and_is_remembered() {
+    fn fallback_can_be_turned_on_and_is_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home {
             root: dir.path().to_path_buf(),
@@ -380,10 +383,10 @@ mod fallback_tests {
             targets: Vec::new(),
             via_gateway: true,
             hybrid: false,
-            fallback: false,
+            fallback: true,
         };
         home.save_route("codex", route).unwrap();
         let saved = home.state().unwrap().routes.remove("codex").unwrap();
-        assert!(!saved.fallback);
+        assert!(saved.fallback);
     }
 }

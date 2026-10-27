@@ -198,8 +198,8 @@ function routeFromCli(route) {
     || target.model === route.model
     || `${target.provider}/${target.model}` === route.model);
   const defaultTarget = targets[Math.max(0, index)];
-  // The CLI omits `fallback` while it is on (home.rs: default_true, skip if true).
-  return { targets, provider: defaultTarget.provider, model: defaultTarget.model, fallback: route.fallback !== false };
+  // The CLI omits `fallback` while it is off (home.rs: off unless explicitly enabled).
+  return { targets, provider: defaultTarget.provider, model: defaultTarget.model, fallback: route.fallback === true };
 }
 
 function routingFromProfiles(result) {
@@ -266,7 +266,7 @@ const INITIAL_ROUTES = [
     targets: OPENAI_MODELS.map(({ model }) => ({ provider: "OpenAI", model })),
     files: ["~/.codex/config.toml"],
     keepOriginal: true,
-    fallback: true,
+    fallback: false,
   },
   {
     id: "opencode",
@@ -277,7 +277,7 @@ const INITIAL_ROUTES = [
     model: "mimo-v2.6-pro",
     targets: ["mimo-v2.6-pro", "deepseek-v4.1-flash"].map((model) => ({ provider: "EVREN", model })),
     files: ["~/.config/opencode/opencode.json"],
-    fallback: true,
+    fallback: false,
   },
   {
     id: "claude",
@@ -289,7 +289,7 @@ const INITIAL_ROUTES = [
     targets: ["deepseek-v4.1-flash", "mimo-v2.6-pro"].map((model) => ({ provider: "EVREN", model })),
     files: ["~/.claude/settings.json"],
     keepOriginal: true,
-    fallback: true,
+    fallback: false,
   },
 ];
 
@@ -678,7 +678,7 @@ function FallbackChain({ route }) {
   const first = route.targets.find((target) => target.provider === route.provider && target.model === route.model)
     ?? route.targets[0];
   if (!first) return null;
-  const chain = route.fallback === false
+  const chain = route.fallback !== true
     ? [first]
     : [first, ...route.targets.filter((target) => routeTargetKey(target) !== routeTargetKey(first))];
   const shown = expanded ? chain : chain.slice(0, 3);
@@ -704,7 +704,7 @@ function FallbackChain({ route }) {
         </button>
       )}
       <p className="chain-note">
-        {route.fallback === false
+        {route.fallback !== true
           ? t("Fallback is off for this route; only the requested model is used.")
           : t("Chain for a default request. The requested model is tried first; on overload, rate limit or an unreachable provider the route's other models are tried in route order. Once a response starts streaming it is not retried.")}
       </p>
@@ -888,7 +888,7 @@ function ExtensionsPage({ routes, connections, oauthConnections, applyState, onI
                 </label>
               )}
               <label className="extension-option">
-                <input type="checkbox" checked={route.fallback !== false} onChange={(event) => onRouteChange(route.id, { fallback: event.target.checked })} />
+                <input type="checkbox" checked={route.fallback === true} onChange={(event) => onRouteChange(route.id, { fallback: event.target.checked })} />
                 <span>
                   <b>{t("Fall back to another model")}</b>
                   <small>{t("If the selected provider is unreachable or rate-limited, the gateway retries the same request with the route's other models. Streaming requests only switch before the first token arrives.")}</small>
@@ -1679,7 +1679,7 @@ export function App() {
           defaultTarget: { provider: route.provider, model: route.model },
           targets: route.targets,
           hybrid: surface === "vscode" && canKeepOriginalList(route) && route.keepOriginal !== false,
-          fallback: route.fallback !== false,
+          fallback: route.fallback === true,
         }),
       });
       const result = await response.json().catch(() => ({}));
