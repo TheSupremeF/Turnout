@@ -90,7 +90,7 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
 }
 
 /// Path the previous executable is moved to during an update.
-fn retired_path(executable: &Path) -> PathBuf {
+pub(crate) fn retired_path(executable: &Path) -> PathBuf {
     let mut name = executable.as_os_str().to_owned();
     name.push(".old");
     PathBuf::from(name)

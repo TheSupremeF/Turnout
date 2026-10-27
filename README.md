@@ -50,7 +50,7 @@ the gateway URL.
 ## Desktop app (Electron)
 
 `npm run electron` opens the GUI in a native window. The renderer never spawns
-processes: `electron/main.mjs` starts a loopback HTTP server on an ephemeral
+processes: `electron/main.cjs` starts a loopback HTTP server on an ephemeral
 port that serves the same `/api/turnout/*` bridge the dev server uses, and the
 window loads it. Both front ends share `scripts/turnout-bridge.mjs`, so a change
 to the API is made once.

@@ -350,7 +350,8 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
     };
     if let Some(note) = placeholder {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(note, dim()))),
+            Paragraph::new(Line::from(Span::styled(note, dim())))
+                .wrap(Wrap { trim: true }),
             rows[4],
         );
     } else {

@@ -114,9 +114,7 @@ pub fn run() -> Result<Outcome> {
         if target.exists() {
             // Windows refuses to overwrite a running .exe but allows renaming
             // it; `turnout update` cleans the `.old` file up on a later start.
-            let mut retired = target.as_os_str().to_owned();
-            retired.push(".old");
-            let retired = PathBuf::from(retired);
+            let retired = crate::update::retired_path(&target);
             let _ = std::fs::remove_file(&retired);
             std::fs::rename(&target, &retired).with_context(|| {
                 format!("cannot replace {} (is it in use?)", target.display())
