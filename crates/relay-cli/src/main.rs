@@ -1,6 +1,7 @@
 //! `turnout` — the standalone CLI. Same core as the desktop app; usable over SSH/CI.
 
 mod home;
+mod install;
 mod update;
 
 use std::net::{SocketAddr, TcpStream};
@@ -145,6 +146,12 @@ enum Cmd {
     Doctor {
         #[arg(long)]
         online: bool,
+    },
+    /// Copy this executable to a per-user folder on PATH (re-points the Agent)
+    Install {
+        /// Also install the background Agent from the installed copy
+        #[arg(long)]
+        agent: bool,
     },
     /// Install the latest release from GitHub (restarts the Agent if installed)
     Update {
@@ -387,6 +394,28 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Profiles { json } => profiles(&home, json),
         Cmd::History { json, limit } => history(&home, json, limit),
         Cmd::Doctor { online } => doctor(&home, online).await,
+        Cmd::Install { agent } => {
+            let had_agent = agent_installed();
+            let outcome = install::run()?;
+            if agent || had_agent {
+                // Register the Agent from the installed copy, not from wherever
+                // this one was started (often Downloads), so deleting the
+                // download later cannot stop it.
+                let status = std::process::Command::new(&outcome.installed)
+                    .args(["gateway", "install"])
+                    .status()
+                    .context("cannot run the installed Turnout")?;
+                if !status.success() {
+                    bail!("the Agent could not be installed from {}", outcome.installed.display());
+                }
+            } else {
+                println!("Run `turnout gateway install` to start the background Agent.");
+            }
+            if outcome.copied {
+                println!("You can delete {} now.", std::env::current_exe()?.display());
+            }
+            Ok(())
+        }
         Cmd::Update { check } => {
             if update::run(check).await? {
                 // The Agent still runs the old binary until it restarts.
@@ -2616,6 +2645,21 @@ fn task_xml(executable: &Path) -> String {
     )
 }
 
+/// Whether a per-user background agent is registered (running or not).
+fn agent_installed() -> bool {
+    if cfg!(target_os = "windows") {
+        std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", relay_core::brand::WINDOWS_TASK])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    } else {
+        agent_file().map(|path| path.exists()).unwrap_or(false)
+    }
+}
+
 fn agent_file() -> Result<PathBuf> {
     if cfg!(target_os = "macos") {
         Ok(dirs::home_dir()
@@ -2737,8 +2781,16 @@ fn install_agent(home: &Home) -> Result<()> {
             executable.display()
         );
         relay_config::write_file(&path, &unit)?;
+        // A running unit keeps its old ExecStart until reloaded and restarted,
+        // which matters when `turnout install` re-points it.
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", relay_core::brand::SYSTEMD_UNIT])
+            .status();
         let status = std::process::Command::new("systemctl")
-            .args(["--user", "enable", "--now", relay_core::brand::SYSTEMD_UNIT])
+            .args(["--user", "restart", relay_core::brand::SYSTEMD_UNIT])
             .status()?;
         if !status.success() {
             bail!("systemd could not install the Turnout Agent");
@@ -2746,6 +2798,14 @@ fn install_agent(home: &Home) -> Result<()> {
         println!("Turnout Agent installed and started");
     } else if cfg!(target_os = "windows") {
         remove_legacy_agent()?;
+        // Stop a running instance first: `/Create /F` replaces the definition
+        // but leaves the old process (possibly an older binary) holding the
+        // ports, and `/Run` below would then be a no-op.
+        let _ = std::process::Command::new("schtasks")
+            .args(["/End", "/TN", relay_core::brand::WINDOWS_TASK])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         // `/Create` accepts no restart policy, so a crashed gateway would stay
         // down until the next sign-in (launchd KeepAlive and systemd
         // Restart=on-failure both cover this). Register the task from an XML

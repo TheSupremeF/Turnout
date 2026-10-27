@@ -11,7 +11,27 @@ terminal UI) plus a desktop app (Electron) and a Vite/React web build.
 The name is the railway switch ("makas"): every harness is pointed at the
 provider you choose, with one config plan per change.
 
-## Install / build
+## Install
+
+**Windows:** download `turnout-windows-x86_64.exe` from the
+[latest release](https://github.com/TheSupremeF/Turnout/releases/latest), then in
+PowerShell:
+
+```powershell
+.\turnout-windows-x86_64.exe install --agent
+```
+
+That copies Turnout to `%LOCALAPPDATA%\Turnout\bin`, adds that folder to your
+user `PATH` (no administrator needed), and starts the background Agent from the
+installed copy — so deleting the download later cannot break it. Open a new
+terminal, then run `turnout`. Without `--agent`, run `turnout gateway install`
+whenever you want the Agent.
+
+The first run may be flagged by SmartScreen because releases are unsigned:
+More info → Run anyway.
+
+**macOS / Linux:** `turnout install` behaves the same (into `~/.local/bin`) and
+prints the `PATH` line to add if the folder is not already on it.
 
 ```sh
 cargo build --release          # target/release/turnout
@@ -54,6 +74,7 @@ turnout models list evren
 turnout plan-targets claude-code --target evren::deepseek-v4.1-flash \
   --default-target evren::deepseek-v4.1-flash --hybrid
 turnout apply
+turnout install                # copy into a per-user folder on PATH (--agent too)
 turnout gateway install        # background agent (launchd/systemd/Task Scheduler)
 turnout run opencode --profile work
 turnout rollback <backup-id>
