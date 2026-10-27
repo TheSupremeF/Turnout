@@ -111,6 +111,8 @@ pub enum ConnMode {
         provider: String,
         quota: crate::data::QuotaInfo,
     },
+    /// What the official logins report about their subscription limits.
+    Usage(Vec<crate::data::UsageInfo>),
     /// Editing a provider's concurrency limit; empty input means unlimited.
     Limit {
         provider: String,
@@ -312,6 +314,8 @@ pub enum Msg {
     Limit(String, Option<u32>, Result<String, String>),
     /// `providers quota` finished.
     Quota(String, Result<crate::data::QuotaInfo, String>),
+    /// `auth usage` finished.
+    Usage(Result<Vec<crate::data::UsageInfo>, String>),
     Agents(usize, Result<AgentsInfo, String>),
     /// An agent or manager plan is ready to review.
     AgentPlan(usize, ReviewAction, Result<String, String>),
@@ -607,6 +611,16 @@ impl App {
                     }
                 };
                 self.modal = Some(Modal::Conn(Conn { cursor, mode }));
+            }
+            Msg::Usage(result) => {
+                let mode = match result {
+                    Ok(usage) => ConnMode::Usage(usage),
+                    Err(error) => {
+                        self.say(format!("Kullanım okunamadı: {error}"), false);
+                        ConnMode::List
+                    }
+                };
+                self.modal = Some(Modal::Conn(Conn { cursor: 0, mode }));
             }
             Msg::Cli {
                 title,
@@ -1530,6 +1544,11 @@ impl App {
         });
     }
 
+    fn ask_usage(&mut self) {
+        self.modal = Some(Modal::Busy("Oturum kotası soruluyor…".into()));
+        self.spawn(|backend| Msg::Usage(backend.usage()));
+    }
+
     fn conn_key(&mut self, mut conn: Conn, key: KeyEvent) {
         let count = self.providers.len();
         match &mut conn.mode {
@@ -1552,6 +1571,10 @@ impl App {
                         return;
                     }
                 }
+                KeyCode::Char('o') => {
+                    self.ask_usage();
+                    return;
+                }
                 KeyCode::Char('l') => {
                     if let Some(provider) = self.providers.get(conn.cursor) {
                         conn.mode = ConnMode::Limit {
@@ -1567,6 +1590,14 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter => conn.mode = ConnMode::List,
                 KeyCode::Char('r') => {
                     self.ask_quota(provider.clone());
+                    return;
+                }
+                _ => {}
+            },
+            ConnMode::Usage(_) => match key.code {
+                KeyCode::Esc | KeyCode::Enter => conn.mode = ConnMode::List,
+                KeyCode::Char('r') => {
+                    self.ask_usage();
                     return;
                 }
                 _ => {}

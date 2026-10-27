@@ -623,8 +623,54 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_limit_is_shown_and_validated_in_connections() {
+    fn subscription_usage_is_shown_in_connections() {
         let mut a = app();
+        press(&mut a, KeyCode::Char('c'));
+        assert!(screen(&mut a, 120, 30).contains("o oturum kotası"));
+        a.apply_message(Msg::Usage(crate::data::parse_usage(
+            r#"[{"provider":"openai","plan":"plus","windows":[
+                {"label":"5h","window_minutes":300,"used_percent":0.0,
+                 "resets_at":"2026-10-28T00:48:58Z"},
+                {"label":"weekly","window_minutes":10080,"used_percent":3.0,
+                 "resets_at":"2026-11-02T05:29:31Z"}]},
+              {"provider":"anthropic","plan":"pro","windows":[
+                {"label":"5h","window_minutes":300,"used_percent":23.0,
+                 "resets_at":"2026-10-28T00:10:00Z"},
+                {"label":"weekly","window_minutes":10080,"used_percent":13.0,
+                 "resets_at":"2026-10-30T19:00:00Z"}]}]"#,
+        )));
+        let view = screen(&mut a, 130, 40);
+        assert!(view.contains("Abonelik kullanımı"), "{view}");
+        assert!(view.contains("ChatGPT · plus"), "{view}");
+        assert!(view.contains("Claude · pro"), "{view}");
+        assert!(view.contains("5 saat"), "{view}");
+        assert!(view.contains("haftalık"), "{view}");
+        assert!(view.contains("%23 kullanıldı"), "{view}");
+        assert!(view.contains("28.10 00:10 UTC'de sıfırlanır"), "{view}");
+        press(&mut a, KeyCode::Esc);
+        assert!(screen(&mut a, 120, 30).contains("o oturum kotası"));
+    }
+
+    #[test]
+    fn a_subscription_usage_error_is_shown_in_red() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('c'));
+        a.apply_message(Msg::Usage(crate::data::parse_usage(
+            r#"[{"provider":"openai","plan":"plus","windows":[
+                {"label":"5h","window_minutes":300,"used_percent":0.0,
+                 "resets_at":"2026-10-28T00:48:58Z"}]},
+              {"provider":"anthropic",
+               "error":"Claude login expired — open Claude Code once to refresh it"}]"#,
+        )));
+        let view = screen(&mut a, 130, 40);
+        assert!(view.contains("ChatGPT · plus"), "{view}");
+        assert!(view.contains("Claude"), "{view}");
+        assert!(view.contains("Claude login expired"), "{view}");
+        assert!(view.contains("o oturum kotası") || view.contains("r yenile"), "{view}");
+    }
+
+    #[test]
+    fn a_provider_limit_is_shown_and_validated_in_connections() {        let mut a = app();
         a.providers[0].max_concurrent = Some(4);
         press(&mut a, KeyCode::Char('c'));
         let list = screen(&mut a, 100, 30);

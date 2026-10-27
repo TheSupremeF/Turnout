@@ -244,6 +244,55 @@ pub fn parse_quota(text: &str) -> Result<QuotaInfo, String> {
     })
 }
 
+/// One window of a subscription limit, as `turnout auth usage --json` prints it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageWindow {
+    /// `"5h"`, `"weekly"`, `"weekly opus"`, …
+    pub label: String,
+    pub window_minutes: u64,
+    pub used_percent: f64,
+    pub resets_at: Option<String>,
+}
+
+/// One provider's subscription usage, or why it could not be read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageInfo {
+    /// `"openai"` or `"anthropic"`.
+    pub provider: String,
+    pub plan: Option<String>,
+    pub windows: Vec<UsageWindow>,
+    pub error: Option<String>,
+}
+
+pub fn parse_usage(text: &str) -> Result<Vec<UsageInfo>, String> {
+    let value: Value = serde_json::from_str(text.trim()).map_err(|error| error.to_string())?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "usage is not a list".to_string())?;
+    Ok(items
+        .iter()
+        .map(|item| UsageInfo {
+            provider: item["provider"].as_str().unwrap_or_default().to_string(),
+            plan: item["plan"].as_str().map(str::to_string),
+            windows: item["windows"]
+                .as_array()
+                .map(|windows| {
+                    windows
+                        .iter()
+                        .map(|window| UsageWindow {
+                            label: window["label"].as_str().unwrap_or_default().to_string(),
+                            window_minutes: window["window_minutes"].as_u64().unwrap_or(0),
+                            used_percent: window["used_percent"].as_f64().unwrap_or(0.0),
+                            resets_at: window["resets_at"].as_str().map(str::to_string),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            error: item["error"].as_str().map(str::to_string),
+        })
+        .collect())
+}
+
 /// One worker agent file, as `turnout agents list --json` reports it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentInfo {
@@ -406,6 +455,10 @@ impl Backend {
 
     pub fn quota(&self, provider: &str) -> Result<QuotaInfo, String> {
         parse_quota(&self.args(&["providers", "quota", provider, "--json"])?)
+    }
+
+    pub fn usage(&self) -> Result<Vec<UsageInfo>, String> {
+        parse_usage(&self.args(&["auth", "usage", "--json"])?)
     }
 
     pub fn agents(&self, harness: &str) -> Result<AgentsInfo, String> {

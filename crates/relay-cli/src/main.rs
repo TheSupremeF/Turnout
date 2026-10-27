@@ -4,6 +4,7 @@ mod agents;
 mod home;
 mod install;
 mod update;
+mod usage;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -176,6 +177,13 @@ enum Cmd {
 #[derive(Subcommand)]
 enum AuthCmd {
     Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the subscription usage limits of the official logins
+    Usage {
+        /// `openai`/`chatgpt` or `anthropic`/`claude`; both when omitted
+        provider: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -758,6 +766,7 @@ async fn auth(home: &Home, cmd: AuthCmd) -> Result<()> {
             println!("{provider} OAuth login started in the system browser");
             Ok(())
         }
+        AuthCmd::Usage { provider, json } => usage::run(home, provider.as_deref(), json).await,
         AuthCmd::CompleteOpenAi => complete_openai_oauth(home).await,
     }
 }
@@ -1425,6 +1434,16 @@ async fn provider_quota(home: &Home, id: &str, json: bool) -> Result<()> {
         Err(error) => match captured_quota(home, id.as_str()) {
             Some(quota) => quota,
             None => match error {
+                // ChatGPT sign-in answers without rate-limit headers; its limits
+                // are the subscription windows `auth usage` reads.
+                relay_core::RelayError::ProviderStatus { status: 404, .. }
+                    if config.credential == openai_oauth_credential() =>
+                {
+                    bail!(
+                        "`{id}` uses ChatGPT sign-in, which does not report API rate limits \
+                         — see the 5-hour and weekly windows with `turnout auth usage openai`"
+                    )
+                }
                 relay_core::RelayError::ProviderStatus { status: 404, .. } => bail!(
                     "`{id}` does not report its quota (no /quota endpoint at {}) \
                      — send one request through Turnout first so its rate-limit \

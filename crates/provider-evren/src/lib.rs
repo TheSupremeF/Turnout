@@ -244,7 +244,7 @@ fn reset_at(value: &str, observed_at: u64) -> Option<String> {
 }
 
 /// Unix seconds → `2026-10-28T00:00:00Z` (civil-from-days, no date crate).
-fn iso_utc(seconds: u64) -> String {
+pub fn iso_utc(seconds: u64) -> String {
     let days = (seconds / 86_400) as i64;
     let time = seconds % 86_400;
     let z = days + 719_468;

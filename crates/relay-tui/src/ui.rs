@@ -850,6 +850,15 @@ fn group(value: f64) -> String {
     out
 }
 
+/// `23` → `23`, `13.5` → `13,5` (Turkish decimal comma, no trailing zeros).
+fn format_percent(value: f64) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}").replace('.', ",")
+    }
+}
+
 /// `2026-10-28T00:00:00Z` → ` · 28.10 00:00 UTC'de sıfırlanır`.
 fn reset_note(at: Option<&str>) -> String {
     let Some(at) = at else { return String::new() };
@@ -875,11 +884,20 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
         ConnMode::Limit { .. } => 6,
         // Title, up to six quota rows, a capture-age line, keys.
         ConnMode::Quota { .. } => 9,
+        // Title, a header and its windows per provider, keys.
+        ConnMode::Usage(ref usage) => 1 + usage
+            .iter()
+            .map(|info| 1 + info.windows.len().max(1))
+            .sum::<usize>(),
         _ => 0,
     };
     let rows = 7 + app.oauth.len().max(1) + app.providers.len().max(1) + 1 + extra;
     // Quota rows carry a meter and a reset time; give them room on one line.
-    let width = if matches!(conn.mode, ConnMode::Quota { .. }) { 100 } else { 84 };
+    let width = if matches!(conn.mode, ConnMode::Quota { .. } | ConnMode::Usage(_)) {
+        100
+    } else {
+        84
+    };
     let rect = centered(
         area,
         width,
@@ -975,6 +993,7 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
             ("d", "kaldır"),
             ("l", "sınır"),
             ("u", "kota"),
+            ("o", "oturum kotası"),
             ("r", "yenile"),
             ("Esc", "kapat"),
         ])),
@@ -1073,6 +1092,55 @@ fn conn_dialog(frame: &mut Frame, app: &App, conn: &Conn, area: Rect) {
                     },
                 );
                 lines.push(Line::from(Span::styled(note, dim())));
+            }
+            lines.push(keys(&[("r", "yenile"), ("Esc", "geri")]));
+        }
+        ConnMode::Usage(usage) => {
+            lines.push(Line::from(Span::styled("Abonelik kullanımı", bold(ACCENT))));
+            for info in usage {
+                let (name, plan) = match info.provider.as_str() {
+                    "openai" => ("ChatGPT", info.plan.as_deref().unwrap_or("")),
+                    "anthropic" => ("Claude", info.plan.as_deref().unwrap_or("")),
+                    other => (other, info.plan.as_deref().unwrap_or("")),
+                };
+                let title = if plan.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} · {plan}")
+                };
+                let title_color = if info.error.is_some() { RED } else { theme::TEXT };
+                lines.push(Line::from(Span::styled(title, bold(title_color))));
+                if let Some(error) = &info.error {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {error}"),
+                        Style::default().fg(RED),
+                    )));
+                    continue;
+                }
+                if info.windows.is_empty() {
+                    lines.push(Line::from(Span::styled("  (pencere yok)", dim())));
+                }
+                for window in &info.windows {
+                    let used = window.used_percent.clamp(0.0, 100.0);
+                    let label = match window.label.as_str() {
+                        "5h" => "5 saat".to_string(),
+                        "weekly" => "haftalık".to_string(),
+                        "weekly opus" => "haftalık opus".to_string(),
+                        "weekly sonnet" => "haftalık sonnet".to_string(),
+                        other => other.to_string(),
+                    };
+                    lines.push(quota_row(
+                        &label,
+                        format!(
+                            "%{} kullanıldı{}",
+                            format_percent(used),
+                            reset_note(window.resets_at.as_deref()),
+                        ),
+                        // The meter shows what is left.
+                        Some(1.0 - used / 100.0),
+                        theme::TEXT,
+                    ));
+                }
             }
             lines.push(keys(&[("r", "yenile"), ("Esc", "geri")]));
         }
