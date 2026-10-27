@@ -25,15 +25,17 @@ async fn upstream() -> (u16, Arc<Mutex<Vec<String>>>) {
             };
             let log = log.clone();
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536];
-                let mut total = 0;
+                // Grows with the request: the gateway accepts up to 64 MiB and
+                // long-session tests send several MiB.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = vec![0u8; 65536];
                 loop {
-                    let n = sock.read(&mut buf[total..]).await.unwrap_or(0);
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
                     if n == 0 {
                         break;
                     }
-                    total += n;
-                    let text = String::from_utf8_lossy(&buf[..total]).to_string();
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
                     if let Some(end) = text.find("\r\n\r\n") {
                         let len = text
                             .lines()
@@ -43,12 +45,12 @@ async fn upstream() -> (u16, Arc<Mutex<Vec<String>>>) {
                                     .map(|v| v.trim().parse::<usize>().unwrap_or(0))
                             })
                             .unwrap_or(0);
-                        if total >= end + 4 + len {
+                        if buf.len() >= end + 4 + len {
                             break;
                         }
                     }
                 }
-                let req = String::from_utf8_lossy(&buf[..total]).to_string();
+                let req = String::from_utf8_lossy(&buf).to_string();
                 let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
                 log.lock().unwrap().push(body.clone());
 
@@ -918,10 +920,28 @@ async fn a_model_outside_the_route_never_reaches_an_upstream() {
 }
 
 #[tokio::test]
+async fn a_long_session_body_reaches_the_upstream() {
+    let (gw, seen) = gateway().await;
+    // 8 MiB is past axum's 2 MiB default but ordinary for a long Codex session.
+    let long = "x".repeat(8 * 1024 * 1024);
+    let response = post(
+        &gw,
+        "/v1/responses",
+        json!({"model": "glm-5.3", "stream": true, "input": long}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    let _ = response.text().await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    gw.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_oversized_body_is_rejected_before_any_upstream_call() {
     let (gw, seen) = gateway().await;
-    // 8 MiB of text: the gateway must answer, not buffer forever or forward it.
-    let huge = "x".repeat(8 * 1024 * 1024);
+    let huge = "x".repeat(relay_gateway::MAX_BODY_BYTES + 1);
     let response = post(
         &gw,
         "/v1/chat/completions",
@@ -929,16 +949,12 @@ async fn an_oversized_body_is_rejected_before_any_upstream_call() {
     )
     .send()
     .await;
-    // Either refused, or accepted and streamed through; what must never happen
-    // is a panic or a hung connection.
+    // Refused with 413, or the connection is cut while the body is still
+    // uploading; never a panic, a hang or a forwarded request.
     match response {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            assert!(status == 200 || status == 400 || status == 413, "status {status}");
-            let _ = response.text().await;
-        }
+        Ok(response) => assert_eq!(response.status(), 413),
         Err(error) => assert!(error.is_timeout() || error.is_request(), "{error}"),
     }
+    assert!(seen.lock().unwrap().is_empty());
     gw.shutdown().await;
-    let _ = seen;
 }

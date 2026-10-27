@@ -14,4 +14,4 @@ mod request_log;
 mod server;
 
 pub use request_log::{requests_dir, RequestMeter};
-pub use server::{Gateway, GatewayConfig, GatewayHandle, GatewayModelRoute};
+pub use server::{Gateway, GatewayConfig, GatewayHandle, GatewayModelRoute, MAX_BODY_BYTES};

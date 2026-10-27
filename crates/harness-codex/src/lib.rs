@@ -32,10 +32,41 @@ pub const HYBRID_PROFILE: &str = "hybrid";
 ///
 /// Every field below is mandatory in Codex 0.16x; the rest of the entry takes
 /// Codex's own defaults, so values are deliberately minimal.
-fn model_catalog(models: &[String], default_model: &str) -> String {
-    let entries = custom_entries(models, default_model, 0);
+fn model_catalog(
+    models: &[String],
+    default_model: &str,
+    levels: &serde_json::Value,
+    default_level: &str,
+) -> String {
+    let entries = custom_entries(models, default_model, 0, levels, default_level);
     serde_json::to_string_pretty(&json!({"models": entries}))
         .expect("model catalog is plain JSON")
+}
+
+/// Reasoning levels every Codex build understood before `xhigh`/`max` were
+/// added. Used when the installed Codex's own catalog cannot be read.
+fn fallback_levels() -> serde_json::Value {
+    json!([
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "medium", "description": "Balances speed and reasoning depth"},
+        {"effort": "high", "description": "Greater reasoning depth"},
+    ])
+}
+
+/// The fullest reasoning list the installed Codex itself advertises.
+///
+/// Codex validates `supported_reasoning_levels` against its compiled-in
+/// `ReasoningEffort` enum, so a level it does not know is rejected; the safe
+/// set is therefore the one its own catalog uses. Entries differ (`xhigh` and
+/// `max` only appear on some models), so the longest list wins.
+pub fn builtin_levels(catalog: &serde_json::Value) -> Option<serde_json::Value> {
+    catalog["models"]
+        .as_array()?
+        .iter()
+        .filter_map(|model| model["supported_reasoning_levels"].as_array())
+        .max_by_key(|levels| levels.len())
+        .filter(|levels| !levels.is_empty())
+        .map(|levels| serde_json::Value::Array(levels.clone()))
 }
 
 /// Hybrid catalog: Codex's built-in entries unchanged (they carry the real
@@ -54,7 +85,22 @@ fn hybrid_catalog(builtin: &serde_json::Value, models: &[String], default_model:
         .cloned()
         .collect::<Vec<_>>();
     let mut entries = official;
-    entries.extend(custom_entries(&custom, default_model, after));
+    let levels = builtin_levels(builtin).unwrap_or_else(fallback_levels);
+    let default_level = builtin["models"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find_map(|m| m["default_reasoning_level"].as_str())
+        })
+        .unwrap_or("medium");
+    entries.extend(custom_entries(
+        &custom,
+        default_model,
+        after,
+        &levels,
+        default_level,
+    ));
     serde_json::to_string_pretty(&json!({"models": entries}))
         .expect("model catalog is plain JSON")
 }
@@ -72,7 +118,13 @@ pub fn builtin_slugs(catalog: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn custom_entries(models: &[String], default_model: &str, first_priority: i64) -> Vec<serde_json::Value> {
+fn custom_entries(
+    models: &[String],
+    default_model: &str,
+    first_priority: i64,
+    levels: &serde_json::Value,
+    default_level: &str,
+) -> Vec<serde_json::Value> {
     models
         .iter()
         .enumerate()
@@ -85,12 +137,8 @@ fn custom_entries(models: &[String], default_model: &str, first_priority: i64) -
                 } else {
                     "Turnout route"
                 },
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Fast responses with lighter reasoning"},
-                    {"effort": "medium", "description": "Balances speed and reasoning depth"},
-                    {"effort": "high", "description": "Greater reasoning depth"},
-                ],
-                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": levels,
+                "default_reasoning_level": default_level,
                 "shell_type": "unified_exec",
                 "visibility": "list",
                 "supported_in_api": true,
@@ -330,10 +378,27 @@ impl HarnessAdapter for CodexAdapter {
         let mut catalog_change = None;
         if ctx.via_gateway {
             let hybrid = route.profile.as_deref() == Some(HYBRID_PROFILE);
+            // Levels come from the installed Codex when it can be asked, so the
+            // picker offers exactly what this build accepts (`xhigh`, `max`, …).
+            // Reading it is a subprocess, and a missing binary is not an error
+            // for a route that does not need it.
+            let builtin = self.builtin_catalog().ok();
             let catalog = if hybrid {
-                hybrid_catalog(&self.builtin_catalog()?, &ctx.models, &ctx.model)
+                hybrid_catalog(
+                    &builtin.ok_or_else(|| {
+                        RelayError::Validation(
+                            "keeping Codex's original model list needs the Codex binary (CLI or VS Code extension)".into(),
+                        )
+                    })?,
+                    &ctx.models,
+                    &ctx.model,
+                )
             } else {
-                model_catalog(&ctx.models, &ctx.model)
+                let levels = builtin
+                    .as_ref()
+                    .and_then(builtin_levels)
+                    .unwrap_or_else(fallback_levels);
+                model_catalog(&ctx.models, &ctx.model, &levels, "medium")
             };
             if hybrid {
                 notes.push(
@@ -564,6 +629,69 @@ mod tests {
         // The custom model sorts after every built-in one.
         assert_eq!(models[3]["priority"], 44);
         assert_eq!(models[3]["visibility"], "list");
+    }
+
+    #[test]
+    fn the_picker_offers_the_levels_the_installed_codex_knows() {
+        let (_dir, adapter, route) = setup();
+        let levels = json!([
+            {"effort": "low", "description": "low"},
+            {"effort": "medium", "description": "medium"},
+            {"effort": "high", "description": "high"},
+            {"effort": "xhigh", "description": "extra high"},
+            {"effort": "max", "description": "max"},
+        ]);
+        let builtin = json!({"models": [
+            {"slug": "gpt-6.1-sol", "priority": 1, "base_instructions": "real",
+             "supported_reasoning_levels": levels},
+            {"slug": "gpt-6-mini", "priority": 2, "base_instructions": "real",
+             "supported_reasoning_levels": [{"effort": "low", "description": "low"},
+                                             {"effort": "medium", "description": "medium"}]},
+        ]});
+        let adapter = adapter.with_builtin_catalog(builtin);
+        let mut context = ctx(false, true);
+        context.models = vec!["evren/glm-5.3".into()];
+        context.model = "evren/glm-5.3".into();
+        let route = Route {
+            model: context.model.clone(),
+            models: context.models.clone(),
+            ..route
+        };
+
+        let plan = adapter.plan_changes(&route, &context).unwrap();
+        let catalog_change = plan
+            .changes
+            .iter()
+            .find(|c| c.format == ConfigFormat::Json)
+            .unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog_change.after).unwrap();
+        // The longest list any built-in model advertises: `xhigh` and `max`
+        // are only offered where Codex itself offers them.
+        let efforts: Vec<&str> = catalog["models"][0]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "medium");
+    }
+
+    #[test]
+    fn the_builtin_levels_prefer_the_longest_list_and_ignore_missing_ones() {
+        let catalog = json!({"models": [
+            {"slug": "a"},
+            {"slug": "b", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]},
+            {"slug": "c", "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]},
+        ]});
+        let levels = builtin_levels(&catalog).unwrap();
+        assert_eq!(levels.as_array().unwrap().len(), 3);
+        assert_eq!(levels[2]["effort"], "high");
+        // No model advertises any: the caller must fall back, not write `[]`.
+        assert!(builtin_levels(&json!({"models": [{"slug": "a"}]})).is_none());
+        assert!(builtin_levels(&json!({"models": []})).is_none());
+        assert_eq!(fallback_levels().as_array().unwrap().len(), 3);
     }
 
     #[test]

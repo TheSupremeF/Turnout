@@ -259,30 +259,7 @@ impl Backend {
     }
 
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
-        let text = self.args(&["harness", "detect"]).unwrap_or_default();
-        HARNESSES
-            .iter()
-            .map(|(id, _, _)| {
-                let line = text
-                    .lines()
-                    .find(|line| line.split_whitespace().next() == Some(id));
-                match line {
-                    Some(line) if line.contains('/') => HarnessInfo {
-                        installed: true,
-                        detail: line
-                            .split_whitespace()
-                            .skip(1)
-                            .take_while(|part| !part.contains('/'))
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    },
-                    _ => HarnessInfo {
-                        installed: false,
-                        detail: "kurulu değil".into(),
-                    },
-                }
-            })
-            .collect()
+        parse_harnesses(&self.args(&["harness", "detect"]).unwrap_or_default())
     }
 
     pub fn providers(&self) -> Result<Vec<ProviderInfo>, String> {
@@ -547,6 +524,35 @@ pub fn is_chat_model(model: &str) -> bool {
     .any(|marker| id.contains(marker))
 }
 
+/// Read `turnout harness detect` output: a harness counts as installed when
+/// its line carries a binary path, `/`-separated or Windows `\\`-separated.
+fn parse_harnesses(text: &str) -> Vec<HarnessInfo> {
+    let is_path = |part: &str| part.contains(['/', '\\']);
+    HARNESSES
+        .iter()
+        .map(|(id, _, _)| {
+            let line = text
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some(id));
+            match line {
+                Some(line) if is_path(line) => HarnessInfo {
+                    installed: true,
+                    detail: line
+                        .split_whitespace()
+                        .skip(1)
+                        .take_while(|part| !is_path(part))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                },
+                _ => HarnessInfo {
+                    installed: false,
+                    detail: "kurulu değil".into(),
+                },
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +603,16 @@ mod tests {
         ] {
             assert!(!is_chat_model(model), "{model}");
         }
+    }
+
+    #[test]
+    fn windows_paths_count_as_installed() {
+        let text = "codex        codex-cli 0.164.0-alpha.11.1  C:\\Users\\x\\.vscode\\extensions\\openai.chatgpt-26.1021.22027-win32-x64\\bin\\windows-x86_64\\codex.exe\n             config: C:\\Users\\x\\.codex\\config.toml\nclaude-code  2.1.153 (Claude Code)  /usr/local/bin/claude\nopencode     not found\n";
+        let found = parse_harnesses(text);
+        assert!(found[0].installed);
+        assert_eq!(found[0].detail, "codex-cli 0.164.0-alpha.11.1");
+        assert!(found[1].installed);
+        assert_eq!(found[1].detail, "2.1.153 (Claude Code)");
+        assert!(!found[2].installed);
     }
 }

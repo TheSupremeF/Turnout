@@ -159,6 +159,48 @@ function createWindow(origin) {
   window.loadURL(origin);
 }
 
+/// Compare `major.minor.patch`, ignoring a leading `v` and any suffix.
+function versionTuple(text) {
+  const core = String(text).trim().replace(/^v/, "").split(/[-+]/)[0];
+  return core.split(".").map((part) => Number.parseInt(part, 10) || 0).concat([0, 0, 0]).slice(0, 3);
+}
+
+function isNewer(latest, current) {
+  const a = versionTuple(latest);
+  const b = versionTuple(current);
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] !== b[i]) return a[i] > b[i];
+  }
+  return false;
+}
+
+/// Tell the user when a newer release exists. Installing is left to them: the
+/// macOS build is unsigned, and Squirrel-based auto-update refuses unsigned
+/// apps, so a silent updater would fail exactly where it is needed most.
+async function checkForUpdate() {
+  try {
+    const response = await fetch(
+      "https://api.github.com/repos/TheSupremeF/Turnout/releases/latest",
+      { headers: { Accept: "application/vnd.github+json", "User-Agent": `Turnout/${app.getVersion()}` } },
+    );
+    if (!response.ok) return;
+    const release = await response.json();
+    if (!isNewer(release.tag_name, app.getVersion())) return;
+    const { response: choice } = await dialog.showMessageBox(window, {
+      type: "info",
+      buttons: ["Download", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Update available",
+      message: `Turnout ${release.tag_name} is available`,
+      detail: `You have ${app.getVersion()}. The download page opens in your browser.`,
+    });
+    if (choice === 0) shell.openExternal(release.html_url);
+  } catch {
+    // Offline or rate-limited: an update check must never disturb startup.
+  }
+}
+
 async function bootstrap() {
   try {
     await loadModules();
@@ -195,6 +237,7 @@ async function bootstrap() {
   const { server, origin } = await startServer();
   bridge = server;
   createWindow(origin);
+  window.once("ready-to-show", () => setTimeout(checkForUpdate, 3000));
 }
 
 app.whenReady().then(bootstrap);

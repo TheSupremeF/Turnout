@@ -149,6 +149,7 @@ pub fn anthropic_to_chat(
             .unwrap_or_default(),
         tools,
         tool_choice,
+        reasoning_effort: None,
         stream: v["stream"].as_bool().unwrap_or(false),
         metadata: Default::default(),
     })
@@ -294,6 +295,12 @@ pub fn openai_to_chat(
         },
         tools,
         tool_choice,
+        // Chat-completions clients name it directly; OpenAI's own newer models
+        // also accept `reasoning.effort`, so read both.
+        reasoning_effort: v["reasoning_effort"]
+            .as_str()
+            .or_else(|| v["reasoning"]["effort"].as_str())
+            .map(str::to_string),
         stream: v["stream"].as_bool().unwrap_or(false),
         metadata: Default::default(),
     })
@@ -866,6 +873,7 @@ pub fn responses_to_chat(
         stop: Vec::new(),
         tools,
         tool_choice,
+        reasoning_effort: v["reasoning"]["effort"].as_str().map(str::to_string),
         stream: v["stream"].as_bool().unwrap_or(false),
         metadata: Default::default(),
     })
@@ -1400,6 +1408,43 @@ mod tests {
         assert_eq!(b.len(), 3);
         assert!(matches!(&req.messages[3].content, MessageContent::Blocks(b)
             if matches!(&b[0], ContentBlock::ToolResult { content, .. } if content == "/w")));
+    }
+
+    #[test]
+    fn reasoning_effort_survives_every_dialect() {
+        let responses = json!({"model": "glm", "input": "hi",
+            "reasoning": {"effort": "xhigh", "summary": "auto"}});
+        assert_eq!(
+            responses_to_chat(&responses, ProtocolDialect::OpenAiChat, None)
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("xhigh")
+        );
+        // Codex always sends a summary; without an effort there is nothing to map.
+        let bare = json!({"model": "glm", "input": "hi", "reasoning": {"summary": "auto"}});
+        assert_eq!(
+            responses_to_chat(&bare, ProtocolDialect::OpenAiChat, None)
+                .unwrap()
+                .reasoning_effort,
+            None
+        );
+        let chat = json!({"model": "glm", "messages": [], "reasoning_effort": "high"});
+        assert_eq!(
+            openai_to_chat(&chat, ProtocolDialect::OpenAiChat, None)
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+        let chat_nested = json!({"model": "glm", "messages": [], "reasoning": {"effort": "max"}});
+        assert_eq!(
+            openai_to_chat(&chat_nested, ProtocolDialect::OpenAiChat, None)
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("max")
+        );
     }
 
     #[test]

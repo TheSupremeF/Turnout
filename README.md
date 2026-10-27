@@ -57,17 +57,19 @@ turnout apply
 turnout gateway install        # background agent (launchd/systemd/Task Scheduler)
 turnout run opencode --profile work
 turnout rollback <backup-id>
+turnout update                 # install the latest release (--check to only look)
 ```
 
 API keys are encrypted at rest by default: `vault.json` in the data directory is
-sealed with XChaCha20-Poly1305 under a random 256-bit data key that lives in the
-OS credential service (macOS Keychain, Windows Credential Manager, Linux Secret
-Service). A copy of the data directory alone reveals no key, and no passphrase
-is needed per command. Config files only ever receive environment-variable
-*names*.
+sealed with XChaCha20-Poly1305 under a random 256-bit key kept in `vault.key`, an
+owner-only file beside it. The key is deliberately not in the macOS Keychain:
+Keychain access is tied to the binary's code signature, so every rebuild of an
+unsigned CLI would prompt again, and the GUI starts the CLI per request. No
+passphrase is needed per command. Config files only ever receive
+environment-variable *names*.
 
-`TURNOUT_CREDENTIALS` selects another backend: `keyring` (a separate OS item per
-secret), `vault` (Argon2id passphrase via `TURNOUT_VAULT_PASSWORD`), or `file`
+`TURNOUT_CREDENTIALS` selects another backend: `keyring` (the vault key in the
+OS credential service), `vault` (Argon2id passphrase via `TURNOUT_VAULT_PASSWORD`), or `file`
 (plain `credentials.json`, `0600` file in a `0700` directory — not encrypted).
 Upgrading from a build that used the plain file encrypts the keys on first run
 and renames the old file to `credentials.json.imported`.

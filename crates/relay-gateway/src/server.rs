@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -27,6 +27,10 @@ use crate::convert::{
 };
 
 const HEARTBEAT: Duration = Duration::from_secs(10);
+/// Largest request body the gateway buffers. axum's 2 MiB default is far below
+/// what a long Codex or Claude Code session sends (full history, file contents,
+/// base64 images); the gateway only listens on loopback behind a token.
+pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// How long a verified Claude credential is trusted before it is probed again.
 const NATIVE_CREDENTIAL_TTL: Duration = Duration::from_secs(600);
 const NATIVE_CACHE_LIMIT: usize = 256;
@@ -118,6 +122,7 @@ impl Gateway {
             .route("/v1/chat/completions", post(chat_completions))
             .route("/v1/responses", post(responses))
             .route("/v1/models", get(models))
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(state);
         let (shutdown, rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {

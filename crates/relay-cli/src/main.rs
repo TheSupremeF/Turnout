@@ -1,6 +1,7 @@
 //! `turnout` — the standalone CLI. Same core as the desktop app; usable over SSH/CI.
 
 mod home;
+mod update;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -145,6 +146,12 @@ enum Cmd {
         #[arg(long)]
         online: bool,
     },
+    /// Install the latest release from GitHub (restarts the Agent if installed)
+    Update {
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -249,6 +256,7 @@ fn open_interface() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    update::remove_retired_executable();
     let home = Home::locate()?;
     let Some(command) = cli.command else {
         return open_interface();
@@ -379,6 +387,17 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Profiles { json } => profiles(&home, json),
         Cmd::History { json, limit } => history(&home, json, limit),
         Cmd::Doctor { online } => doctor(&home, online).await,
+        Cmd::Update { check } => {
+            if update::run(check).await? {
+                // The Agent still runs the old binary until it restarts.
+                match restart_agent() {
+                    Ok(true) => println!("Turnout Agent restarted on the new version"),
+                    Ok(false) => {}
+                    Err(error) => eprintln!("warning: could not restart the Turnout Agent: {error}"),
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2545,7 +2564,9 @@ fn xml_escape(value: &str) -> String {
 /// behaviour: `RestartOnFailure` restarts `gateway serve` a minute after it
 /// exits, and `ExecutionTimeLimit` is disabled so the gateway is never
 /// stopped just for running for more than three days (the Task Scheduler
-/// default).
+/// default). `turnout.exe` is a console program, so started directly it opens
+/// a terminal window that stops the gateway when closed; `conhost --headless`
+/// hosts it without one.
 fn task_xml(executable: &Path) -> String {
     let exe = xml_escape(&executable.to_string_lossy());
     let working_dir = executable
@@ -2586,8 +2607,8 @@ fn task_xml(executable: &Path) -> String {
   </Settings>\n\
   <Actions Context=\"Author\">\n\
     <Exec>\n\
-      <Command>{exe}</Command>\n\
-      <Arguments>gateway serve</Arguments>\n\
+      <Command>conhost.exe</Command>\n\
+      <Arguments>--headless \"{exe}\" gateway serve</Arguments>\n\
       <WorkingDirectory>{working_dir}</WorkingDirectory>\n\
     </Exec>\n\
   </Actions>\n\

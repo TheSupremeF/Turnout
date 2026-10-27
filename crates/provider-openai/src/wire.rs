@@ -29,6 +29,9 @@ pub fn build_chat_body(req: &ChatRequest, stream: bool) -> Value {
     if !req.stop.is_empty() {
         body["stop"] = json!(req.stop);
     }
+    if let Some(effort) = &req.reasoning_effort {
+        body["reasoning_effort"] = json!(effort);
+    }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
             req.tools
@@ -118,6 +121,9 @@ pub fn build_responses_body(req: &ChatRequest, stream: bool) -> Value {
     }
     if let Some(value) = req.top_p {
         body["top_p"] = json!(value);
+    }
+    if let Some(effort) = &req.reasoning_effort {
+        body["reasoning"] = json!({"effort": effort});
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -569,6 +575,30 @@ pub fn infer_capabilities(model: &str) -> ModelCapabilities {
 mod tests {
     use super::*;
     use relay_core::ToolDef;
+
+    #[test]
+    fn reasoning_effort_reaches_the_upstream_in_both_dialects() {
+        let req = ChatRequest {
+            model: "glm".into(),
+            messages: vec![ChatMessage::user("hi")],
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_chat_body(&req, true)["reasoning_effort"], "high");
+        assert_eq!(
+            build_responses_body(&req, true)["reasoning"]["effort"],
+            "high"
+        );
+        // A model without the knob must not receive a parameter it rejects.
+        let plain = ChatRequest {
+            reasoning_effort: None,
+            ..req
+        };
+        assert!(build_chat_body(&plain, true).get("reasoning_effort").is_none());
+        assert!(build_responses_body(&plain, true)
+            .get("reasoning")
+            .is_none());
+    }
 
     #[test]
     fn builds_body_with_tools_and_tool_results() {

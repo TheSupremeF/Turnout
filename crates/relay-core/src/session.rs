@@ -128,6 +128,11 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
+    /// How hard a reasoning model should think, as the harness named it
+    /// (`low`, `medium`, `high`, …). Providers map it to their own knob; a
+    /// model without one simply ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub stream: bool,
     #[serde(default)]
