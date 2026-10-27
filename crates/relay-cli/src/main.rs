@@ -1,5 +1,6 @@
 //! `turnout` — the standalone CLI. Same core as the desktop app; usable over SSH/CI.
 
+mod agents;
 mod home;
 mod install;
 mod update;
@@ -155,6 +156,9 @@ enum Cmd {
         #[arg(long)]
         online: bool,
     },
+    /// Worker agents the harness's main model hands work to (Claude Code)
+    #[command(subcommand)]
+    Agents(AgentsCmd),
     /// Copy this executable to a per-user folder on PATH (re-points the Agent)
     Install {
         /// Also install the background Agent from the installed copy
@@ -226,6 +230,57 @@ enum ProvidersCmd {
         #[arg(long)]
         clear: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// List worker agents and the model that manages them
+    List {
+        /// Project whose `.claude/agents` to read (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview adding, changing or removing a worker (writes nothing)
+    Plan {
+        /// Agent name the manager calls it by (lowercase, digits, dashes)
+        name: String,
+        /// Worker model: provider::model from the claude-code route
+        /// (e.g. evren::deepseek-v4.1-flash) or a Claude model (opus, claude-…)
+        #[arg(long, required_unless_present = "remove")]
+        model: Option<String>,
+        #[arg(long, value_enum, default_value_t = agents::Scope::Project)]
+        scope: agents::Scope,
+        /// Project for --scope project (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// When the manager should use this worker
+        #[arg(long)]
+        description: Option<String>,
+        /// How many may run at once; written for the manager to follow. The
+        /// hard cap is `turnout providers limit`.
+        #[arg(long)]
+        parallel: Option<u32>,
+        #[arg(long, default_value_t = 40)]
+        max_turns: u32,
+        /// Work in the main checkout instead of a fresh git worktree
+        #[arg(long)]
+        no_worktree: bool,
+        /// Comma-separated tool allowlist (default: the harness's full set)
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+        /// The worker's instructions, read from a file
+        #[arg(long)]
+        instructions_file: Option<PathBuf>,
+        /// Plan removing this worker instead
+        #[arg(long, conflicts_with = "model")]
+        remove: bool,
+    },
+    /// Apply the saved agent plan (with backup)
+    Apply,
+    /// Undo an agent change (latest when no id is given)
+    Rollback { id: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -400,6 +455,9 @@ async fn run(cli: Cli) -> Result<()> {
                     home.remove_route(&harness)?;
                     println!("saved route for {harness} cleared (there was none before)");
                 }
+                None if agents::is_agents_backup(&home, &id) => {
+                    println!("agent files restored; start a new Claude Code session to load them")
+                }
                 None => println!(
                     "note: this backup predates route tracking; the saved route was left as is"
                 ),
@@ -416,6 +474,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Profiles { json } => profiles(&home, json),
         Cmd::History { json, limit } => history(&home, json, limit),
         Cmd::Doctor { online } => doctor(&home, online).await,
+        Cmd::Agents(cmd) => agents_command(&home, cmd),
         Cmd::Install { agent } => {
             let had_agent = agent_installed();
             let outcome = install::run()?;
@@ -3038,6 +3097,133 @@ fn uninstall_agent() -> Result<()> {
     }
     println!("Turnout Agent removed");
     Ok(())
+}
+
+fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
+    let route = || -> Result<Option<SavedRoute>> {
+        Ok(home.state()?.routes.get(HarnessId::CLAUDE_CODE).cloned())
+    };
+    match command {
+        AgentsCmd::List { project, json } => {
+            let found = agents::list(home, project.as_deref())?;
+            let manager = route()?.map(|route| route.model);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "harness": HarnessId::CLAUDE_CODE, "manager": manager, "agents": found })
+                );
+                return Ok(());
+            }
+            match &manager {
+                Some(model) => println!("manager: {model} (claude-code route default; `/model` changes it per session)"),
+                None => println!("manager: Claude Code's own default (no Turnout route for claude-code)"),
+            }
+            if found.is_empty() {
+                println!("no worker agents — try: turnout agents plan deepseek-worker --model evren::deepseek-v4.1-flash");
+            }
+            for agent in found {
+                println!(
+                    "{:<20} {:<32} {:<8} {}{}",
+                    agent.name,
+                    agent.model.as_deref().unwrap_or("(inherits manager)"),
+                    agent.scope,
+                    if agent.managed { "turnout" } else { "hand-written" },
+                    if agent.routable { "" } else { "  NOT SERVED BY THE ROUTE" }
+                );
+            }
+            Ok(())
+        }
+        AgentsCmd::Plan {
+            name,
+            model,
+            scope,
+            project,
+            description,
+            parallel,
+            max_turns,
+            no_worktree,
+            tools,
+            instructions_file,
+            remove,
+        } => {
+            agents::check_name(&name)?;
+            let path = agents::agents_dir(scope, project.as_deref())?.join(format!("{name}.md"));
+            let spec = match model {
+                Some(model) if !remove => {
+                    let route = route()?;
+                    let model = agents::resolve_model(route.as_ref(), &model)?;
+                    let mut spec = agents::AgentSpec::new(&name, &model);
+                    if let Some(description) = description {
+                        spec.description = description;
+                    }
+                    spec.parallel = parallel;
+                    spec.max_turns = Some(max_turns);
+                    spec.worktree = !no_worktree;
+                    spec.tools = tools;
+                    if let Some(file) = instructions_file {
+                        spec.instructions = std::fs::read_to_string(&file)
+                            .with_context(|| format!("cannot read {}", file.display()))?;
+                    }
+                    if parallel.is_some() {
+                        // The advisory count is only as good as the provider's
+                        // real limit; say so when there is none.
+                        let provider = route.as_ref().and_then(|route| {
+                            route
+                                .enabled_targets()
+                                .into_iter()
+                                .find(|target| target.public_model == model)
+                                .map(|target| target.provider)
+                        });
+                        if let Some(provider) = provider {
+                            let limited = home
+                                .providers()?
+                                .iter()
+                                .any(|p| p.id.as_str() == provider && p.max_concurrent.is_some());
+                            if !limited {
+                                println!(
+                                    "note: `{provider}` has no concurrency limit; to enforce one: turnout providers limit {provider} --max-concurrent <n>"
+                                );
+                            }
+                        }
+                    }
+                    Some(spec)
+                }
+                _ => None,
+            };
+            let plan = agents::plan(home, path, spec.as_ref())?;
+            let diff = plan.diff();
+            println!("{}", if diff.trim().is_empty() { "(no changes — already up to date)".to_string() } else { diff });
+            println!("\nagent plan saved — run `turnout agents apply` to write it");
+            Ok(())
+        }
+        AgentsCmd::Apply => {
+            let (id, paths) = agents::apply(home)?;
+            for path in &paths {
+                println!("  {}", path.display());
+            }
+            println!("applied; backup {id}");
+            println!("undo with: turnout agents rollback {id}");
+            println!("Claude Code loads agents when a session starts: open a new session to use the change.");
+            Ok(())
+        }
+        AgentsCmd::Rollback { id } => {
+            let id = match id {
+                Some(id) => BackupId(id),
+                None => agents::latest_backup(home)?
+                    .ok_or_else(|| anyhow!("no agent changes to roll back"))?,
+            };
+            if !agents::is_agents_backup(home, &id) {
+                bail!("{id} is not an agent change; use `turnout rollback {id}`");
+            }
+            let restored = BackupStore::at(home.backups()).restore(&id)?;
+            println!("restored {} file(s) from {id}", restored.len());
+            for path in restored {
+                println!("  {}", path.display());
+            }
+            println!("Claude Code loads agents when a session starts: open a new session to see it.");
+            Ok(())
+        }
+    }
 }
 
 async fn gateway_command(home: &Home, command: GatewayCmd) -> Result<()> {

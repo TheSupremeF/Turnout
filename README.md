@@ -122,6 +122,34 @@ that predictable:
   instead of tripping the provider's rate limit. The limit covers every
   harness the Agent serves, because provider quotas are per account.
 
+### Managers and workers
+
+The harness's main model manages; worker agents do delegated tasks on their
+own model, in their own git worktree. For Claude Code the manager is the
+route's default model and each worker is a subagent file Turnout writes:
+
+```sh
+# Manager: Opus on Claude's own login. Workers may use DeepSeek via EVREN.
+turnout plan-targets claude-code --hybrid \
+  --target anthropic::claude-opus-5-5 --target evren::deepseek-v4.1-flash \
+  --default-target anthropic::claude-opus-5-5
+turnout apply
+
+turnout agents plan deepseek-worker --model evren::deepseek-v4.1-flash --parallel 3
+turnout agents apply             # writes .claude/agents/deepseek-worker.md
+turnout agents list              # manager, workers, and whether each is routable
+turnout agents rollback          # undo the last agent change
+```
+
+Any pairing works the same way: make GPT-6 the default target and the workers
+DeepSeek, or Opus the default with one GPT-6 and one DeepSeek worker. Turnout
+refuses a worker on a model the route does not serve, never takes over an agent
+file it did not write, and `--scope user` writes to `~/.claude/agents` instead
+of the project. `--parallel` is advice the manager reads; the hard cap is
+`turnout providers limit`. Claude Code loads agents when a session starts, so
+open a new session after a change. Codex and OpenCode workers are not
+supported yet.
+
 Each line in the request log (`requests/<harness>.jsonl` in the data
 directory) records the model that was asked for, the one that answered,
 `fallback`, `retries` and `queued_ms`.

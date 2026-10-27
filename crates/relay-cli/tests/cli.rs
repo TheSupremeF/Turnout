@@ -523,3 +523,81 @@ fn parallel_agent_settings_limits_and_explicit_fallback_chains() {
     ]);
     assert!(!ok && out.contains("cannot fall back to itself"), "{out}");
 }
+
+#[test]
+fn agents_put_workers_on_routed_models_and_roll_back() {
+    let env = Env::new();
+    let claude_dir = env.home.path().join("claude");
+    let project = env.home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let settings = claude_dir.join("settings.json");
+    let run = |args: &[&str]| {
+        env.run_with(
+            &[("CLAUDE_CONFIG_DIR", claude_dir.to_str().unwrap())],
+            args,
+            None,
+        )
+    };
+    let project_arg = project.to_str().unwrap();
+
+    let (ok, out) = run(&["providers", "add", "evren", "--base-url", "https://api.example.test/v1"]);
+    assert!(ok, "{out}");
+    // Manager: Opus on Claude's own login. Worker model: DeepSeek via the gateway.
+    let (ok, out) = run(&[
+        "plan-targets",
+        "claude-code",
+        "--hybrid",
+        "--target",
+        "anthropic::claude-opus-5-5",
+        "--target",
+        "evren::deepseek-v4.1-flash",
+        "--default-target",
+        "anthropic::claude-opus-5-5",
+        "--config",
+        settings.to_str().unwrap(),
+    ]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["apply", "--harness", "claude-code"]);
+    assert!(ok, "{out}");
+
+    let (ok, out) = run(&[
+        "agents", "plan", "deepseek-worker", "--model", "evren::deepseek-v4.1-flash",
+        "--project", project_arg, "--parallel", "3",
+    ]);
+    assert!(ok, "{out}");
+    assert!(out.contains("+model: \"deepseek-v4.1-flash\""), "{out}");
+    assert!(out.contains("+isolation: worktree"), "{out}");
+    assert!(out.contains("providers limit evren"), "warns that 3 is not enforced: {out}");
+    let worker = project.join(".claude/agents/deepseek-worker.md");
+    assert!(!worker.exists(), "plan writes nothing");
+
+    let (ok, out) = run(&["agents", "apply"]);
+    assert!(ok, "{out}");
+    assert!(worker.exists());
+
+    let (ok, out) = run(&["agents", "list", "--project", project_arg, "--json"]);
+    assert!(ok, "{out}");
+    let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(listed["manager"], "claude-opus-5-5", "{listed}");
+    assert_eq!(listed["agents"][0]["name"], "deepseek-worker", "{listed}");
+    assert_eq!(listed["agents"][0]["routable"], true, "{listed}");
+    assert_eq!(listed["agents"][0]["managed"], true, "{listed}");
+
+    // A model the route does not serve would fail mid-task; refuse it now.
+    let (ok, out) = run(&[
+        "agents", "plan", "gpt-worker", "--model", "openai::gpt-6.1-sol", "--project", project_arg,
+    ]);
+    assert!(!ok && out.contains("not served by the claude-code route"), "{out}");
+
+    // A hand-written agent is never taken over.
+    std::fs::write(project.join(".claude/agents/mine.md"), "---\nname: mine\ndescription: x\n---\nhi\n").unwrap();
+    let (ok, out) = run(&[
+        "agents", "plan", "mine", "--model", "evren::deepseek-v4.1-flash", "--project", project_arg,
+    ]);
+    assert!(!ok && out.contains("not written by Turnout"), "{out}");
+
+    let (ok, out) = run(&["agents", "rollback"]);
+    assert!(ok, "{out}");
+    assert!(!worker.exists(), "rolling back a new worker removes it");
+    assert!(project.join(".claude/agents/mine.md").exists());
+}
