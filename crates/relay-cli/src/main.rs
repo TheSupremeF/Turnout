@@ -801,10 +801,12 @@ fn open_system_browser(url: &str) -> Result<()> {
         command.arg(url);
         command
     };
+    // Not `cmd /C start`: cmd splits the command line at `&`, so an OAuth URL
+    // reached the browser cut after its first query parameter.
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", "", url]);
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", url]);
         command
     };
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -1024,7 +1026,10 @@ async fn complete_openai_oauth(home: &Home) -> Result<()> {
             }
         }
     }
-    open_system_browser(authorize.as_str())?;
+    eprintln!("Sign in with ChatGPT in your browser. If it did not open, visit:\n  {authorize}");
+    if let Err(error) = open_system_browser(authorize.as_str()) {
+        eprintln!("{error:#}");
+    }
 
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(600), listener.accept())
         .await
