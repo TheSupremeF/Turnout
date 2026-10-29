@@ -3568,9 +3568,40 @@ fn agents_command(home: &Home, command: AgentsCmd) -> Result<()> {
     }
 }
 
+/// Detaches the Agent from a console that only it uses.
+///
+/// The scheduled task starts `gateway serve` under `conhost --headless`, but
+/// when Windows Terminal is the default terminal Windows hands that console to
+/// it anyway: a tab opens, and closing the tab stops the gateway. Leaving the
+/// console closes the tab and keeps the gateway running. Run from a shell, the
+/// console also holds the shell, so the gateway keeps it and stays stoppable
+/// with Ctrl-C. Without a console `schtasks /End` can no longer deliver
+/// Ctrl-Break, so Task Scheduler ends the process instead.
+#[cfg(windows)]
+fn leave_own_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        fn FreeConsole() -> i32;
+    }
+    let mut processes = [0u32; 2];
+    // SAFETY: the buffer is valid for `processes.len()` ids.
+    let attached =
+        unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+    if attached == 1 {
+        // SAFETY: no handle derived from the console is held at this point;
+        // std's stdio treats the now-invalid handles as discarded output.
+        unsafe { FreeConsole() };
+    }
+}
+
 async fn gateway_command(home: &Home, command: GatewayCmd) -> Result<()> {
     match command {
-        GatewayCmd::Serve { harness } => serve_gateways(home, harness.as_deref()).await,
+        GatewayCmd::Serve { harness } => {
+            #[cfg(windows)]
+            leave_own_console();
+            serve_gateways(home, harness.as_deref()).await
+        }
         GatewayCmd::Token => {
             println!("{}", gateway_token(home)?);
             Ok(())
