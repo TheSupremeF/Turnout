@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "harness-claude"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "dirs",
  "relay-config",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "harness-codex"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "dirs",
  "relay-config",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "harness-opencode"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "dirs",
  "relay-config",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "provider-anthropic"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "futures",
  "relay-core",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "provider-evren"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "futures",
  "provider-openai",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "provider-openai"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "futures",
  "relay-core",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "relay-cli"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "relay-config"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "dirs",
  "relay-core",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "relay-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bytes",
  "dirs",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "relay-credentials"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "relay-gateway"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "axum",
  "bytes",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "relay-tui"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "ratatui",
  "relay-core",
