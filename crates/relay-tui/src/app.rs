@@ -656,6 +656,13 @@ impl App {
                 tabs.push(provider.id.clone());
             }
         }
+        // A route can still name a provider that has since been removed; its
+        // tab is the only place those models can be deselected.
+        for target in self.drafts.iter().flat_map(|draft| &draft.targets) {
+            if !tabs.contains(&target.provider) {
+                tabs.push(target.provider.clone());
+            }
+        }
         tabs
     }
 
@@ -675,9 +682,11 @@ impl App {
         }
     }
 
-    /// Model ids shown for one provider, honoring the search box.
-    pub fn entries(&self, provider: &str, query: &str) -> Vec<String> {
-        let all: Vec<String> = match provider {
+    /// Model ids shown for one provider, honoring the search box. Models the
+    /// route uses that the catalog does not list (it failed, is not loaded yet
+    /// or dropped them) come first, so they can always be deselected.
+    pub fn entries(&self, provider: &str, harness: usize, query: &str) -> Vec<String> {
+        let listed: Vec<String> = match provider {
             "anthropic" => ANTHROPIC_MODELS.iter().map(|id| id.to_string()).collect(),
             _ => match self.catalog.get(provider) {
                 // The complete live catalog; non-chat models are tagged in the UI.
@@ -688,6 +697,13 @@ impl App {
                 _ => Vec::new(),
             },
         };
+        let mut all: Vec<String> = self.drafts[harness]
+            .targets
+            .iter()
+            .filter(|target| target.provider == provider && !listed.contains(&target.model))
+            .map(|target| target.model.clone())
+            .collect();
+        all.extend(listed);
         let query = query.to_lowercase();
         all.into_iter()
             .filter(|id| query.is_empty() || id.to_lowercase().contains(&query))
@@ -1094,7 +1110,7 @@ impl App {
     fn picker_key(&mut self, mut picker: Picker, key: KeyEvent) {
         let tabs = self.tabs();
         let provider = tabs[picker.tab].clone();
-        let entries = self.entries(&provider, &picker.query);
+        let entries = self.entries(&provider, picker.harness, &picker.query);
         let selected = picker.list.selected().unwrap_or(0);
         let target = entries
             .get(selected)

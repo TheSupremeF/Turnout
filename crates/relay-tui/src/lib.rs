@@ -526,6 +526,31 @@ mod tests {
     }
 
     #[test]
+    fn route_models_stay_deselectable_without_a_catalog() {
+        let mut a = app();
+        // Codex route made earlier: an OpenAI model whose catalog never loaded
+        // here, and one from a provider that has since been removed.
+        a.drafts[0].targets = vec![
+            Target::new("openai", "gpt-6.1-sol"),
+            Target::new("groq", "llama-5-70b"),
+        ];
+        assert!(a.catalog.get("openai").is_none());
+        press(&mut a, KeyCode::Enter); // picker on EVREN
+        press(&mut a, KeyCode::Right); // OpenAI
+        let view = screen(&mut a, 120, 30);
+        assert!(view.contains("gpt-6.1-sol"), "{view}");
+        press(&mut a, KeyCode::Char(' '));
+        assert_eq!(a.drafts[0].targets, vec![Target::new("groq", "llama-5-70b")]);
+
+        assert!(a.tabs().contains(&"groq".to_string()));
+        press(&mut a, KeyCode::Right); // Anthropic
+        press(&mut a, KeyCode::Right); // groq, kept for its route model
+        assert!(screen(&mut a, 120, 30).contains("llama-5-70b"));
+        press(&mut a, KeyCode::Char(' '));
+        assert!(a.drafts[0].targets.is_empty());
+    }
+
+    #[test]
     fn fallback_is_set_in_the_picker_and_shown_in_the_review() {
         let mut a = app();
         a.cursor = 1; // Claude Code

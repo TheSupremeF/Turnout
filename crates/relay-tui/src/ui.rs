@@ -322,7 +322,7 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
     let name = HARNESSES[harness].1;
     let tabs = app.tabs();
     let provider = tabs[picker.tab].clone();
-    let shown = app.entries(&provider, &picker.query).len().max(4) as u16;
+    let shown = app.entries(&provider, harness, &picker.query).len().max(4) as u16;
     let footer = if harness == CLAUDE { 3 } else { 2 };
     let height = (shown + 4 + footer + 2).clamp(12, area.height.saturating_sub(2).max(12));
     let rect = centered(area, 84, height);
@@ -389,7 +389,7 @@ fn picker_dialog(frame: &mut Frame, app: &App, picker: &mut Picker, area: Rect) 
         rows[3],
     );
 
-    let entries = app.entries(&provider, &picker.query);
+    let entries = app.entries(&provider, harness, &picker.query);
     let placeholder = match app.catalog.get(provider.as_str()) {
         Some(Catalog::Loading) => Some(format!(
             "{} model listesi yükleniyor…",
