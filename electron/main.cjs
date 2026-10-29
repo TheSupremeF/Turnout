@@ -18,21 +18,24 @@ const { createServer } = require("node:http");
 const { existsSync, readFileSync } = require("node:fs");
 const { readFile } = require("node:fs/promises");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 
 const here = __dirname;
 const root = path.resolve(here, "..");
 
 // `scripts/` is ESM (`type: module`), so it is loaded with dynamic `import()`
-// rather than `require()`, which would throw ERR_REQUIRE_ESM.
+// rather than `require()`, which would throw ERR_REQUIRE_ESM. `import()` takes
+// a URL, so paths go through `pathToFileURL`: a bare `C:\…` path on Windows
+// reads as the URL scheme `c:` and the import fails.
 let bridgeHandler = null;
 let turnoutExecutable = null;
 let turnoutLogoSvg = null;
 
 async function loadModules() {
-  const bridge = await import(path.join(root, "scripts", "turnout-bridge.mjs"));
+  const bridge = await import(pathToFileURL(path.join(root, "scripts", "turnout-bridge.mjs")).href);
   bridgeHandler = bridge.bridgeHandler;
   turnoutExecutable = bridge.turnoutExecutable;
-  const logo = await import(path.join(root, "scripts", "logo.mjs"));
+  const logo = await import(pathToFileURL(path.join(root, "scripts", "logo.mjs")).href);
   turnoutLogoSvg = logo.turnoutLogoSvg;
 }
 
