@@ -157,9 +157,51 @@ const MODEL_OPTIONS = [
   })),
 ];
 
-const modelLabel = (provider, model) => MODEL_OPTIONS.find(
-  (option) => option.provider === provider && option.model === model,
-)?.label ?? model;
+// Live catalogs fetched from the CLI (`turnout models list <id> --json`). The
+// lists above are only the fallback while loading or when the CLI cannot
+// answer; Anthropic reads the installed Claude Code when no API key is stored,
+// so new Claude models appear without a Turnout release.
+const LIVE_CATALOG_PROVIDERS = ["Anthropic"];
+const liveCatalogs = new Map();
+const liveCatalogRequests = new Map();
+const liveCatalogListeners = new Set();
+
+function loadLiveCatalog(provider) {
+  if (!LIVE_CATALOG_PROVIDERS.includes(provider) || liveCatalogRequests.has(provider)) return;
+  const request = fetch(`/api/turnout/models?provider=${encodeURIComponent(providerId(provider))}`)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((body) => {
+      const models = Array.isArray(body?.models) ? body.models.filter((row) => typeof row?.id === "string") : [];
+      if (!models.length) return;
+      const known = new Map(MODEL_OPTIONS.filter((option) => option.provider === provider)
+        .map((option) => [option.model, option.label]));
+      liveCatalogs.set(provider, models.map(({ id, label }) => ({
+        provider,
+        model: id,
+        label: known.get(id) ?? label ?? id,
+      })));
+      liveCatalogListeners.forEach((listener) => listener());
+    })
+    .catch(() => {});
+  liveCatalogRequests.set(provider, request);
+}
+
+function useLiveCatalogs() {
+  const [, setVersion] = useState(0);
+  useEffect(() => {
+    const listener = () => setVersion((version) => version + 1);
+    liveCatalogListeners.add(listener);
+    LIVE_CATALOG_PROVIDERS.forEach(loadLiveCatalog);
+    return () => liveCatalogListeners.delete(listener);
+  }, []);
+}
+
+const catalogFor = (provider) => liveCatalogs.get(provider)
+  ?? MODEL_OPTIONS.filter((option) => option.provider === provider);
+
+const modelLabel = (provider, model) => catalogFor(provider).find((option) => option.model === model)?.label
+  ?? MODEL_OPTIONS.find((option) => option.provider === provider && option.model === model)?.label
+  ?? model;
 
 // Claude Code and Codex can keep their built-in model list and append models
 // from other providers after it. Claude's list stays on Claude's own login;
@@ -402,6 +444,7 @@ function Sidebar({ active, onChange }) {
 
 function ProvidersBar({ connections, oauthConnections, loading }) {
   const t = useT();
+  useLiveCatalogs();
   return (
     <section className="providers-bar" aria-label={t("Providers")}>
       {Object.values(PROVIDERS).map((provider) => {
@@ -413,7 +456,7 @@ function ProvidersBar({ connections, oauthConnections, loading }) {
         // not a credential Turnout can hand to Codex, OpenCode or the gateway.
         const subscriptionOnly = provider.id === "anthropic" && !connection?.has_key && Boolean(oauth?.logged_in);
         const dot = loading ? "offline" : subscriptionOnly ? "amber" : (connected ? "" : "offline");
-        const catalog = `${t("Catalog")} ${provider.catalog}`;
+        const catalog = `${t("Catalog")} ${catalogFor(provider.name).length}`;
         // While connections are still being read, an empty list is not "no key".
         const detail = loading ? `${catalog} · ${t("Reading…")}` : subscriptionOnly
           ? `Subscription · ${oauth.plan || "Claude"}`
@@ -442,7 +485,8 @@ function ProvidersBar({ connections, oauthConnections, loading }) {
 function ModelSelect({ route, onChange, connections, oauthConnections, routingStatus, pending }) {
   const t = useT();
   const [catalogProvider, setCatalogProvider] = useState(route.provider);
-  const providerModels = MODEL_OPTIONS.filter((option) => option.provider === catalogProvider);
+  useLiveCatalogs();
+  const providerModels = catalogFor(catalogProvider);
   // Until the CLI state is read the route on screen is only a placeholder;
   // opening the picker would mean editing a guess.
   const ready = routingStatus === "ready";
@@ -550,7 +594,7 @@ function ModelSelect({ route, onChange, connections, oauthConnections, routingSt
             {Object.keys(PROVIDERS).map((provider) => {
               const routed = route.targets.filter((target) => target.provider === provider).length;
               const connected = targetReady(route, { provider }, connections, oauthConnections);
-              const counts = `${t("Catalog")} ${PROVIDERS[provider].catalog} · ${t("routed")} ${routed}`;
+              const counts = `${t("Catalog")} ${catalogFor(provider).length} · ${t("routed")} ${routed}`;
               return <option key={provider} value={provider}>{provider} · {counts}{connected ? "" : (provider === "Anthropic" && route.id !== "claude" ? ` · ${t("API key required")}` : ` · ${t("connection required")}`)}</option>;
             })}
           </select>

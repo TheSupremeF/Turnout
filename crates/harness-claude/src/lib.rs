@@ -2,6 +2,8 @@
 //! (`$CLAUDE_CONFIG_DIR/settings.json` when set); the CLI and the VS Code
 //! extension share them. Variable names were checked against Claude Code 2.1.x.
 
+pub mod models;
+
 use std::path::PathBuf;
 
 use relay_config::kit::{self, Edit};

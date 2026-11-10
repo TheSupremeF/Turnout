@@ -324,7 +324,13 @@ enum AgentsCmd {
 
 #[derive(Subcommand)]
 enum ModelsCmd {
-    List { provider: String },
+    /// List a provider's models. `anthropic` works without an API key: the
+    /// ids then come from the installed Claude Code.
+    List {
+        provider: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -385,10 +391,21 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Auth(cmd) => auth(&home, cmd).await,
         Cmd::Providers(ProvidersCmd::Quota { id, json }) => provider_quota(&home, &id, json).await,
         Cmd::Providers(cmd) => providers(&home, cmd),
-        Cmd::Models(ModelsCmd::List { provider }) => {
-            let adapter = provider_adapter(&home, &provider)?;
-            for model in adapter.discover_models().await? {
-                println!("{}", model.id);
+        Cmd::Models(ModelsCmd::List { provider, json }) => {
+            let (source, models) = list_models(&home, &provider).await?;
+            if json {
+                let rows: Vec<_> = models
+                    .iter()
+                    .map(|(id, label)| serde_json::json!({"id": id, "label": label}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({"provider": provider, "source": source, "models": rows})
+                );
+            } else {
+                for (id, _) in models {
+                    println!("{id}");
+                }
             }
             Ok(())
         }
@@ -1830,6 +1847,78 @@ impl ProviderAdapter for OpenAiOAuthProvider {
                 .await
         })
     }
+}
+
+/// `(source, [(id, label)])` for `turnout models list`. Anthropic prefers the
+/// live `/v1/models` when a key is stored and otherwise reads the ids compiled
+/// into the installed Claude Code, so a subscription-only setup still sees the
+/// current lineup.
+async fn list_models(home: &Home, provider: &str) -> Result<(&'static str, Vec<(String, String)>)> {
+    let configured = home
+        .providers()?
+        .into_iter()
+        .any(|p| p.id == ProviderId::new(provider));
+    let live_error = if configured {
+        let adapter = provider_adapter(home, provider)?;
+        match adapter.discover_models().await {
+            Ok(models) if !models.is_empty() => {
+                let rows = models.into_iter().map(|m| (m.id, m.display_name)).collect();
+                return Ok(("api", rows));
+            }
+            Ok(_) => None,
+            Err(e) if provider != "anthropic" => return Err(e.into()),
+            Err(e) => Some(e.to_string()),
+        }
+    } else if provider != "anthropic" {
+        bail!("unknown provider `{provider}` — see `turnout providers list`");
+    } else {
+        None
+    };
+    let binary = relay_config::kit::find_binary(&["claude"])
+        .and_then(|b| std::fs::canonicalize(&b).ok().or(Some(b)));
+    let Some(binary) = binary else {
+        bail!(
+            "Claude Code is not installed and no Anthropic key is stored{}",
+            live_error.map(|e| format!(" ({e})")).unwrap_or_default()
+        );
+    };
+    let ids = claude_model_ids_cached(home, &binary)?;
+    let rows = ids
+        .into_iter()
+        .map(|id| {
+            let label = harness_claude::models::model_label(&id);
+            (id, label)
+        })
+        .collect();
+    Ok(("claude-code", rows))
+}
+
+/// Scanning a ~300 MB binary takes a moment; reuse the result until the
+/// binary changes (path, size and mtime).
+fn claude_model_ids_cached(home: &Home, binary: &std::path::Path) -> Result<Vec<String>> {
+    let meta = std::fs::metadata(binary)?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let key = format!("{}|{}|{mtime}", binary.display(), meta.len());
+    let cache = home.claude_models_cache();
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if value["key"] == key {
+                if let Some(ids) = value["models"].as_array() {
+                    return Ok(ids.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+                }
+            }
+        }
+    }
+    let ids = harness_claude::models::model_ids_in_binary(binary)?;
+    if !ids.is_empty() {
+        let _ = std::fs::write(&cache, serde_json::json!({"key": key, "models": ids}).to_string());
+    }
+    Ok(ids)
 }
 
 fn provider_adapter(home: &Home, id: &str) -> Result<Box<dyn ProviderAdapter>> {

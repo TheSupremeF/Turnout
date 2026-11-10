@@ -106,12 +106,31 @@ impl ProviderAdapter for AnthropicProvider {
 
     fn discover_models(&self) -> BoxFuture<'_, Result<Vec<Model>>> {
         Box::pin(async move {
+            // `/v1/models` returns 20 per page unless asked otherwise; follow
+            // `has_more`/`last_id` so newer models are not cut off.
             let path = self.config.models_path.as_deref().unwrap_or("models");
-            let value: Value = self
-                .http
-                .get_json(&self.url(path), &self.headers()?)
-                .await?;
-            Ok(parse_models(&self.config.id, &value))
+            let base = self.url(path);
+            let headers = self.headers()?;
+            let sep = if base.contains('?') { '&' } else { '?' };
+            let mut models = Vec::new();
+            let mut after: Option<String> = None;
+            for _ in 0..50 {
+                let url = match &after {
+                    Some(id) => format!("{base}{sep}limit=1000&after_id={id}"),
+                    None => format!("{base}{sep}limit=1000"),
+                };
+                let value: Value = self.http.get_json(&url, &headers).await?;
+                let page = parse_models(&self.config.id, &value);
+                let more = value["has_more"].as_bool().unwrap_or(false);
+                let last = value["last_id"].as_str().map(str::to_string);
+                let empty = page.is_empty();
+                models.extend(page);
+                match (more, last) {
+                    (true, Some(id)) if !empty && after.as_deref() != Some(&id) => after = Some(id),
+                    _ => break,
+                }
+            }
+            Ok(models)
         })
     }
 

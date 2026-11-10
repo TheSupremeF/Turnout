@@ -190,6 +190,22 @@ export async function bridgeHandler(request, response, options = {}) {
       return true;
     }
 
+    // Live model list for the picker. Anthropic falls back to the ids in the
+    // installed Claude Code when no API key is stored.
+    if (url.pathname === "/api/turnout/models" && request.method === "GET") {
+      const provider = url.searchParams.get("provider") || "";
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(provider)) {
+        sendJson(response, 400, { error: "invalid provider" });
+        return true;
+      }
+      const result = await execFileAsync(turnout, ["models", "list", provider, "--json"], {
+        maxBuffer: 2_000_000,
+        timeout: 60_000,
+      });
+      sendJson(response, 200, JSON.parse(result.stdout));
+      return true;
+    }
+
     if (url.pathname === "/api/turnout/oauth" && request.method === "GET") {
       sendJson(response, 200, { connections: await oauthList(turnout) });
       return true;

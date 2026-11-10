@@ -127,6 +127,10 @@ impl Home {
     pub fn gateway_token_file(&self) -> PathBuf {
         self.root.join("gateway.token")
     }
+    /// Model ids read from the installed Claude Code, keyed by binary.
+    pub fn claude_models_cache(&self) -> PathBuf {
+        self.root.join("claude-models.json")
+    }
     pub fn gateway_log(&self) -> PathBuf {
         self.root.join("gateway.log")
     }
